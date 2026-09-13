@@ -44,7 +44,13 @@ COPY --from=builder /build/dist /usr/share/nginx/html
 
 EXPOSE 80
 
+# 健康检查必须写 127.0.0.1 而不是 localhost。
+#
+# 容器内 `localhost` 会先解析到 IPv6 `::1`，而 nginx 默认只监听 IPv4 ——
+# 于是 `wget http://localhost/health` 直接 Connection refused，
+# 健康状态连续失败，而站点实际上完全是好的。
+# 这种「监控说挂了但服务是好的」比真挂更浪费排查时间。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -qO- http://localhost/health >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1/health >/dev/null 2>&1 || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

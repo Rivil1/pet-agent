@@ -61,7 +61,10 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      # 写 127.0.0.1 而不是 localhost：容器内 localhost 会先走 IPv6 `::1`，
+      # 而 uvicorn --host 0.0.0.0 只监听 IPv4。curl 会自动回退，
+      # 但依赖「客户端恰好会回退」不是一个健康检查该有的前提。
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -124,7 +127,7 @@ services:
     volumes:
       - milvus-data:/var/lib/milvus
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9091/healthz"]
       interval: 15s
       timeout: 10s
       retries: 10
