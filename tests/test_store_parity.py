@@ -754,6 +754,12 @@ class TestCascadeDelete:
             user_id="user-1", pet_id="pet-1", query_vector=vec(1.0), limit=10
         ) == [], "向量索引里的条目也必须清掉，否则已删数据仍会影响检索"
 
+        # 宠物档案行本身也要没 —— 否则「删掉了」的猫还在列表里，
+        # 而用户看到的「删除成功」是假的。
+        assert store.list_pets(user_id="user-1") == [], (
+            "宠物档案行没被删掉 —— 「删除成功」与实际不符"
+        )
+
     def test_delete_does_not_touch_other_tenants(self, store: Any):
         deleter = getattr(store, "delete_pet_data", None)
         if not callable(deleter):

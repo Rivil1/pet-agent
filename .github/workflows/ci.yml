@@ -59,6 +59,53 @@ jobs:
         run: pytest tests/ -q
 
   # ===========================================================================
+  # 评测（不是测试 —— 它产出**数字**，而不只是通过/失败）
+  # ===========================================================================
+  eval:
+    name: Eval · Baseline & Ablation
+    runs-on: ubuntu-latest
+    needs: [backend-test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 基线：离线可跑（HashEmbedder + MockLLM），不花钱、不依赖外部 API
+      - name: Baseline eval
+        run: python -m app.eval --strict --out reports
+
+      # 消融：跑基线与全部对照组的差值。
+      # 故障注入组（faulty-llm-unguarded）**预期就是失败** —— 它展示的
+      # 是「没有守卫会怎样」，那个失败正是结论本身，所以这里不加 --strict。
+      - name: Ablation eval
+        run: python -m app.eval --ablation --out reports
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: reports/
+          retention-days: 30
+
+      # 报告里若出现「本次对比无效」（实验组全崩），说明有配置跑不起来 ——
+      # 那不该让构建红（可能是缺 secrets），但必须能被看见。
+      - name: Warn on invalid comparisons
+        run: |
+          if grep -q '本次对比无效' reports/eval.md; then
+            echo "::warning::报告里有「本次对比无效」—— 某组消融没跑起来"
+          fi
+
+  # ===========================================================================
   # 前端：静态检查 + 构建
   # ===========================================================================
   frontend-lint:

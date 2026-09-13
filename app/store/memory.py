@@ -327,7 +327,9 @@ class InMemoryStore:
         removed = 0
 
         for mid in [
-            k for k, v in self._memories.items() if _tenant_of(v.event) == (user_id, pet_id)
+            k
+            for k, v in self._memories.items()
+            if _tenant_of(v.event) == (user_id, pet_id)
         ]:
             del self._memories[mid]
             removed += 1
@@ -339,7 +341,9 @@ class InMemoryStore:
                 del self._dedup_index[key]
 
         for rid in [
-            k for k, v in self._meow_records.items() if _tenant_of(v) == (user_id, pet_id)
+            k
+            for k, v in self._meow_records.items()
+            if _tenant_of(v) == (user_id, pet_id)
         ]:
             del self._meow_records[rid]
             removed += 1
@@ -354,6 +358,16 @@ class InMemoryStore:
             k for k, v in self._messages.items() if _tenant_of(v) == (user_id, pet_id)
         ]:
             del self._messages[mdid]
+            removed += 1
+
+        # ⚠️ **宠物档案行本身也要删。**
+        #
+        # 初版漏了它，于是「删掉这只猫」之后它还留在 `list_pets` 里 ——
+        # 用户看到的「删除成功」与实际不符。
+        # `MySQLStore` 那边同样漏过，两边一起补齐（以免又出现实现漂移）。
+        pet = self._pets.get(pet_id)
+        if pet is not None and pet.user_id == user_id:
+            del self._pets[pet_id]
             removed += 1
 
         return removed

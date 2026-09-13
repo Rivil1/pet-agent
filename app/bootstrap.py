@@ -178,9 +178,13 @@ def create_app_from_env(
         resolved_store = store
         resolved_health = health_store
     else:
-        bundle = build_store_from_env(dim=built.config.embed_dim if built.config else 1024)
+        bundle = build_store_from_env(
+            dim=built.config.embed_dim if built.config else 1024
+        )
         resolved_store = bundle.store
-        resolved_health = health_store if health_store is not None else bundle.health_store
+        resolved_health = (
+            health_store if health_store is not None else bundle.health_store
+        )
 
     # 装配结果挂到 app.state 上，供 /healthz 与运维查看
     app = create_app(

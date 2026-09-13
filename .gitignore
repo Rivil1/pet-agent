@@ -52,3 +52,6 @@ Dockerfile.local
 Thumbs.db
 # 本地部署/提交用临时文件
 .git-commit-msg
+
+# 评测报告 JSON（可复现，`make eval` 重新生成；MD 报告进版本库作为证据）
+reports/*.json

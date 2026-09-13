@@ -45,11 +45,11 @@ from app.schemas import (
     ContextLabel,
     EvidenceMode,
     IntentCandidate,
-    MeowRecord,
     MemoryEvent,
     MemoryItem,
     MemorySource,
     MemoryStatus,
+    MeowRecord,
     PendingInterpretation,
     PetProfile,
     RetrievalSource,
@@ -111,9 +111,13 @@ class MySQLPool:
         import pymysql  # 延迟导入：未装 MySQL 驱动时不应影响其他后端
 
         self._pymysql = pymysql
+        # 这里不再做 `int(port)` 之类的防御性转换：
+        # 参数的类型标注已经声明为 int，而 `build_store_from_env` 也用
+        # `_int_env()` 校验过了 —— 重复转换只是把「调用方传错了」
+        # 藏进一个看起来更宽容的构造函数里。
         self._connect_kwargs: dict[str, Any] = {
             "host": host,
-            "port": int(port),
+            "port": port,
             "user": user,
             "password": password,
             "database": database,
@@ -123,11 +127,11 @@ class MySQLPool:
             # 而不是返回一个“看起来能用但字段全错位”的对象。
             "cursorclass": pymysql.cursors.DictCursor,
             "autocommit": False,
-            "connect_timeout": int(connect_timeout_s),
+            "connect_timeout": connect_timeout_s,
             "read_timeout": 30,
             "write_timeout": 30,
         }
-        self._size = max(1, int(size))
+        self._size = max(1, size)
         self._acquire_timeout_s = acquire_timeout_s
         self._pool: list[Any] = []
         self._idle = threading.Semaphore(0)
@@ -192,8 +196,14 @@ class MySQLPool:
         except Exception:
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001 - 回滚失败时保留原始异常
-                pass
+            except Exception as rb_exc:  # noqa: BLE001
+                # **必须留痕。** 回滚失败意味着这个连接可能带着未结束的事务
+                # 被还回池里 —— 下一个使用者会看到脏数据，而那时完全看不出
+                # 根因在哪。不在这里说，那件事就永远不会被知道。
+                #
+                # 但仍然 `raise` 原始异常：用 rollback 的失败覆盖它，
+                # 会把「查询为什么错」换成「回滚为什么错」，后者是次要信息。
+                logger.warning("回滚失败（将保留原始异常）：%s", rb_exc)
             raise
         finally:
             self._checkin(conn)
@@ -243,8 +253,10 @@ class MySQLPool:
         except Exception:  # noqa: BLE001
             try:
                 conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as close_exc:  # noqa: BLE001
+                # 关一个已经死掉的连接失败，不影响重建 —— 但记下来，
+                # 因为「关不掉」持续出现通常意味着文件描述符在泄漏。
+                logger.debug("关闭失效连接时出错：%s", close_exc)
             self._release_slot()
             if self._reserve_slot():
                 return self._connect_or_release()
@@ -270,8 +282,10 @@ class MySQLPool:
         for conn in conns:
             try:
                 conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as close_exc:  # noqa: BLE001
+                # 显式关闭失败意味着这连接可能还开着 —— 那是一个真实的
+                # 资源泄漏，不是「清理时的小插曲」。所以要说出来。
+                logger.warning("关闭连接失败（可能泄漏）：%s", close_exc)
 
 
 # =============================================================================
@@ -328,7 +342,20 @@ def _json_load(raw: Any, default: Any) -> Any:
         return default
     if isinstance(raw, (dict, list)):
         return raw
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # **记一笔再抛，而不是吞掉。**
+        #
+        # 本函数的契约就是「JSON 坏了要抛」：把 DecodeError 吞成默认值
+        # 会让「数据损坏」表现成「字段为空」，而后者在业务上是合法的
+        # （比如 `supersedes` 真的可以为空）——两者一旦不可区分，
+        # 一条本应被取代的记忆会重新生效。
+        #
+        # 而「直接抛、什么都不说」也是不够的：数据库里有一列解析不了时，
+        # 调用方看到的是 `JSONDecodeError`，看不出**是哪一列、什么内容**。
+        logger.error("JSON 列损坏：%r", raw[:120] if isinstance(raw, str) else raw)
+        raise exc
 
 
 def _model_dump_list(items: Sequence[Any]) -> str:
@@ -401,6 +428,9 @@ _TENANT_SCOPED_SQL: dict[str, str] = {
     """,
     "delete_pet_pending": """
         DELETE FROM pending_interpretations WHERE user_id = %s AND pet_id = %s
+    """,
+    "delete_pet": """
+        DELETE FROM pets WHERE pet_id = %s AND user_id = %s
     """,
     "select_vectors": """
         SELECT memory_id, user_id, pet_id, vector FROM memories
@@ -493,7 +523,9 @@ class MySQLStore(MemoryStore):
         with self._pool.acquire() as conn, conn.cursor() as cur:
             # 先取租户清单，再逐租户回填 —— 这样查询始终带租户过滤，
             # 与 _TENANT_SCOPED_SQL 的约定一致（也便于按租户限流）
-            cur.execute("SELECT DISTINCT user_id, pet_id FROM memories WHERE vector IS NOT NULL")
+            cur.execute(
+                "SELECT DISTINCT user_id, pet_id FROM memories WHERE vector IS NOT NULL"
+            )
             tenants = cur.fetchall()
 
         for row in tenants:
@@ -526,7 +558,9 @@ class MySQLStore(MemoryStore):
                 if vec is None:
                     continue
                 entries.append(
-                    VectorEntry(memory_id=mid, user_id=user_id, pet_id=pet_id, vector=vec)
+                    VectorEntry(
+                        memory_id=mid, user_id=user_id, pet_id=pet_id, vector=vec
+                    )
                 )
                 last_id = mid
 
@@ -600,6 +634,11 @@ class MySQLStore(MemoryStore):
         与健康数据同理（`HealthDataPolicy`）：软标记不满足删除要求。
         向量也要一起清 —— 只删 MySQL 会让索引里留下孤儿条目，
         而孤儿条目仍会被检索命中，于是「已删除的数据」还能影响结果。
+
+        ⚠️ **包括宠物档案行本身。**
+        初版漏了 `pets`，于是「删掉这只猫」之后它还留在列表里 ——
+        而用户看到的「删除成功」与实际不符。
+        评测的收尾清理最先撞上这个：`pets` 表里全是残留。
         """
         removed = 0
         with self._pool.acquire() as conn, conn.cursor() as cur:
@@ -611,6 +650,12 @@ class MySQLStore(MemoryStore):
             ):
                 cur.execute(_TENANT_SCOPED_SQL[key], (user_id, pet_id))
                 removed += cur.rowcount or 0
+            # 档案行最后删（其余表逻辑上都挂在它下面）
+            cur.execute(
+                "DELETE FROM pets WHERE pet_id = %s AND user_id = %s",
+                (pet_id, user_id),
+            )
+            removed += cur.rowcount or 0
 
         try:
             index = self._index
@@ -660,9 +705,9 @@ class MySQLStore(MemoryStore):
                         _to_db(event.valid_to),
                         _to_db(event.occurred_at),
                         _enum_value(event.source),
-                        float(event.confidence),
+                        event.confidence,
                         _enum_value(event.status),
-                        int(event.support_count),
+                        event.support_count,
                         _to_db(event.last_seen_at),
                         event.superseded_by,
                         _json_dump(list(event.supersedes)),
@@ -674,9 +719,7 @@ class MySQLStore(MemoryStore):
                 )
         except Exception as exc:  # noqa: BLE001
             if _is_duplicate_key(exc):
-                raise DuplicateMemory(
-                    f"dedup_key={event.dedup_key} 已存在"
-                ) from exc
+                raise DuplicateMemory(f"dedup_key={event.dedup_key} 已存在") from exc
             raise
 
         if vector is not None:
@@ -724,9 +767,9 @@ class MySQLStore(MemoryStore):
             _to_db(event.valid_to),
             _to_db(event.occurred_at),
             _enum_value(event.source),
-            float(event.confidence),
+            event.confidence,
             _enum_value(event.status),
-            int(event.support_count),
+            event.support_count,
             _to_db(event.last_seen_at),
             event.superseded_by,
             _json_dump(list(event.supersedes)),
@@ -761,9 +804,7 @@ class MySQLStore(MemoryStore):
 
     def get_memory(self, *, user_id: str, pet_id: str, memory_id: str) -> MemoryEvent:
         with self._pool.acquire() as conn, conn.cursor() as cur:
-            cur.execute(
-                _TENANT_SCOPED_SQL["get_memory"], (memory_id, user_id, pet_id)
-            )
+            cur.execute(_TENANT_SCOPED_SQL["get_memory"], (memory_id, user_id, pet_id))
             row = cur.fetchone()
         if row is None:
             raise NotFound(f"memory {memory_id} 不存在")
@@ -992,7 +1033,7 @@ class MySQLStore(MemoryStore):
             sql += " AND session_id = %s"
             params.append(session_id)
         sql += " ORDER BY at DESC LIMIT %s"
-        params.append(int(limit))
+        params.append(limit)
 
         with self._pool.acquire() as conn, conn.cursor() as cur:
             cur.execute(sql, tuple(params))
@@ -1052,7 +1093,7 @@ class MySQLStore(MemoryStore):
             out.append(
                 MemoryItem(
                     event=event,
-                    score=max(0.0, float(hit.score)),
+                    score=max(0.0, hit.score),
                     retrieval_source=RetrievalSource.VECTOR,
                     matched_on="embedding",
                 )
@@ -1087,6 +1128,41 @@ def _is_duplicate_key(exc: Exception) -> bool:
     """
     args = getattr(exc, "args", ())
     return bool(args) and args[0] == 1062
+
+
+def _as_number(value: Any, *, field: str, row_hint: Any) -> float:
+    """把数据库列值转成数字。**转换失败时记一笔再抛。**
+
+    为什么不吞成 0.0：这一列的语义是「置信度」。一个读不出来的置信度
+    如果静默变成 0.0，那条记忆会从「确定」变成「完全不可信」，
+    而下游（排序、晋升）看到的是一个合法的数字 —— 没人会发现。
+
+    为什么也不"直接抛、什么都不说"：数据库里出现非数字时，
+    调用方看到的是 `ValueError`，看不出**是哪一列、哪一行**。
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        logger.error("列 %s 无法转成数字（row=%s）：%r", field, row_hint, value)
+        raise exc
+
+
+def _as_int(value: Any, *, field: str, row_hint: Any, default: int | None = None) -> int:
+    """把数据库列值转成整数。`default` 只对 **NULL/空值** 生效。
+
+    区分「NULL」（允许回退默认值）与「非数字」（必须抛）——
+    把后者也回退，一条损坏的行会变成一个看起来正常的数字。
+    """
+    if value is None or value == "":
+        if default is None:
+            logger.error("列 %s 为空且无默认值（row=%s）", field, row_hint)
+            raise ValueError(f"列 {field} 为空且无默认值")
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        logger.error("列 %s 无法转成整数（row=%s）：%r", field, row_hint, value)
+        raise exc
 
 
 def _row_to_pet(row: Any) -> PetProfile:
@@ -1128,9 +1204,18 @@ def _row_to_memory(row: Any) -> MemoryEvent:
         valid_to=_from_db(_row_field(row, "valid_to")),
         occurred_at=_from_db(_row_field(row, "occurred_at")),
         source=MemorySource(_row_field(row, "source")),
-        confidence=float(_row_field(row, "confidence")),
+        confidence=_as_number(
+            _row_field(row, "confidence"),
+            field="confidence",
+            row_hint=_row_field(row, "memory_id"),
+        ),
         status=MemoryStatus(_row_field(row, "status")),
-        support_count=int(_row_field(row, "support_count") or 1),
+        support_count=_as_int(
+            _row_field(row, "support_count"),
+            field="support_count",
+            row_hint=_row_field(row, "memory_id"),
+            default=1,
+        ),
         last_seen_at=_from_db(_row_field(row, "last_seen_at")),
         superseded_by=_row_field(row, "superseded_by"),
         supersedes=list(_json_load(_row_field(row, "supersedes"), [])),

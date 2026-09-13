@@ -43,6 +43,7 @@ from app.graph.nodes import (
     make_companion_agent,
     make_context_loader,
     make_memory_retriever,
+    make_response_guard,
     make_memory_writer,
     make_profile_analyzer,
     record_acknowledge,
@@ -84,6 +85,9 @@ def build_graph(
     similar_lookup: Callable[[AgentState], list] | None = None,
     records_lookup: Callable[[AgentState], list] | None = None,
     media_extractor: Any | None = None,
+    use_memory: bool = True,
+    retrieve_fn: Callable[..., Any] | None = None,
+    apply_guard: bool = True,
 ):
     """组装并编译图。
 
@@ -96,12 +100,22 @@ def build_graph(
 
     ``media_extractor`` 产出 **`OBSERVED` 证据**（多模态模型对画面/音频的观察）。
     它**不参与模式选择，也不改变候选排序** —— 只在解释产出后追加。
+
+    ``use_memory`` / ``retrieve_fn`` / ``apply_guard`` 是**消融开关**：
+    它们让同一张图在有/无某个机制时各跑一次，而差异只在这几行 ——
+    这是 `DESIGN §6.3`「消融须用配置开关、不能维护两份代码」的落点。
+    默认值即生产行为；它们只能由代码显式传入，不读环境变量。
     """
     builder = StateGraph(AgentState)
 
     builder.add_node("load_context", make_context_loader(store))
     builder.add_node("understand_input", understand_input)
-    builder.add_node("memory_retriever", make_memory_retriever(store, embedder))
+    builder.add_node(
+        "memory_retriever",
+        make_memory_retriever(
+            store, embedder, use_memory=use_memory, retrieve_fn=retrieve_fn
+        ),
+    )
     builder.add_node("companion_agent", make_companion_agent(llm))
     builder.add_node(
         "behavior_interpreter",
@@ -115,7 +129,7 @@ def build_graph(
     builder.add_node("record_acknowledge", record_acknowledge)
     builder.add_node("profile_analyzer", make_profile_analyzer(vision))
     builder.add_node("clarify_ask", clarify_ask)
-    builder.add_node("response_guard", response_guard)
+    builder.add_node("response_guard", make_response_guard(apply=apply_guard))
 
     builder.add_edge(START, "load_context")
     builder.add_edge("load_context", "understand_input")

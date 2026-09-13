@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any, Callable
 
 from app.graph.normalize import parse_time_range
 from app.graph.state import (
@@ -344,8 +345,24 @@ def _recent_turns(
     return kept, len(rows) - len(kept)
 
 
-def make_memory_retriever(store: MemoryStore, embedder):
-    """构造检索节点。依赖注入，便于单测替换。"""
+def make_memory_retriever(
+    store: MemoryStore,
+    embedder,
+    *,
+    use_memory: bool = True,
+    retrieve_fn: Callable[..., Any] | None = None,
+):
+    """构造检索节点。依赖注入，便于单测与**消融**替换。
+
+    Args:
+        use_memory: 为 ``False`` 时**完全不检索** —— 即「只有当前轮」的基线。
+            它不是一个假实现，而是一个真实存在的系统形态：
+            没有记忆层的对话助手就是这么工作的。
+        retrieve_fn: 检索实现。默认 `retrieve_with_status`（混合检索）。
+            消融时传入朴素向量 top-k，**同一张图、只换这一处** ——
+            这正是 `DESIGN §6.3` 要求的「配置开关而非两份代码」。
+    """
+    retrieve_impl = retrieve_fn or retrieve_with_status
 
     def memory_retriever(state: AgentState) -> AgentState:
         started = _now()
@@ -354,7 +371,21 @@ def make_memory_retriever(store: MemoryStore, embedder):
         intent = state.get("intent", InputIntent.CHAT)
         k = policy_for(intent).retrieval_k if intent in InputIntent else 5
 
-        result = retrieve_with_status(
+        if not use_memory:
+            # 无记忆基线：仍然标注出来，否则「召回了 0 条」看起来像检索失败。
+            return AgentState(
+                retrieved_memories=[],
+                pending_memories=[],
+                node_trace=[
+                    _trace(
+                        "memory_retriever",
+                        started=started,
+                        decision="已禁用记忆检索（消融基线）",
+                    )
+                ],
+            )
+
+        result = retrieve_impl(
             store=store,
             embedder=embedder,
             user_id=user_id,
@@ -505,7 +536,7 @@ def make_companion_agent(llm: LLMClient):
 
 
 def response_guard(state: AgentState) -> AgentState:
-    """守卫的**规则层**（`ARCHITECTURE.md` §5.1）。
+    """守卫的**规则层**（`ARCHITECTURE.md` §5.1）。默认实例 —— 生产走这个。
 
     只跑确定性检查：快（<10ms）、必跑。LLM 补漏层是 P1。
 
@@ -513,7 +544,38 @@ def response_guard(state: AgentState) -> AgentState:
     1. 空/退化响应
     2. 健康禁词（`DESIGN.md` §5.4 禁止清单）
     3. 检索为空时的事实性断言（幻觉的主要来源）
+
+    消融请用 `make_response_guard(apply=False)`。
     """
+    return _guarded(state, apply=True)
+
+
+def make_response_guard(*, apply: bool = True):
+    """构造守卫节点。**消融用**。
+
+    `apply=False` 时**不拦截，只照原样输出草案** —— 于是评测能看见
+    「如果没有守卫，用户会收到什么」。
+
+    ## 为什么要有这个缝隙，而不是「把守卫代码注释掉」
+
+    注释掉代码就再也无法验证同一套代码在有/无守卫下分别是多少 ——
+    而那正是「守卫有价值」这个结论的唯一证据。
+    用开关跑两次，差异被限定在这一处，消融结论才可信（`DESIGN §6.3`）。
+
+    ⚠️ **这个开关只服务于评测，绝不能接进生产配置。**
+    生产的守卫是无条件跑的：它拦的是健康禁词与无据断言，
+    前者涉及合规（D9），后者直接决定用户会不会被误导。
+    所以这里没有读任何环境变量 —— 它只能由代码显式传入。
+    """
+
+    def node(state: AgentState) -> AgentState:
+        return _guarded(state, apply=apply)
+
+    return node
+
+
+def _guarded(state: AgentState, *, apply: bool) -> AgentState:
+    """守卫的真实实现。`apply=False` 时跳过拦截，直接放行草案。"""
     started = _now()
     draft = (state.get("draft_response") or "").strip()
     violations: list[Violation] = []
@@ -575,6 +637,29 @@ def response_guard(state: AgentState) -> AgentState:
     critical = [
         v for v in violations if v.severity in (Severity.CRITICAL, Severity.MAJOR)
     ]
+
+    if not apply:
+        # 消融：不拦截。`guard_result` 仍然给出（它记录了**本该被拦下什么**），
+        # 但 `final_response` 用未被改写的草案 ——
+        # 这样评测能量到「违规会不会真的到达用户」。
+        return AgentState(
+            guard_result=GuardResult(
+                passed=not critical,
+                violations=violations,
+                rewrite_attempts=0,
+                degrade_to_conservative=False,
+            ),
+            final_response=draft,
+            node_trace=[
+                _trace(
+                    "response_guard",
+                    started=started,
+                    decision=f"守卫已禁用（消融）：{len(critical)} 条本应拦下",
+                    degraded=False,
+                )
+            ],
+        )
+
     if critical:
         final = (
             "我这边暂时没有相关记录，所以不方便判断。"

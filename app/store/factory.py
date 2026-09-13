@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,8 @@ from typing import Any
 from app.store.base import MemoryStore
 from app.store.memory import InMemoryStore
 from app.store.mysql import MySQLPool, MySQLStore
+
+logger = logging.getLogger(__name__)
 from app.store.vectors import (
     InMemoryVectorIndex,
     VectorIndex,
@@ -89,8 +92,11 @@ class StoreBundle:
             if callable(closer):
                 try:
                     closer()
-                except Exception:  # noqa: BLE001 - 关闭失败不应影响其他清理
-                    pass
+                except Exception as close_exc:  # noqa: BLE001
+                    # 单个组件关闭失败不该阻止其他组件清理 —— 但也不该静默：
+                    # 「连接池没关掉」会在很久以后以 `Too many connections`
+                    # 的形式现身，而那个报错离这里非常远。
+                    logger.warning("关闭 %s 失败：%s", type(obj).__name__, close_exc)
 
 
 def _build_vector_index(*, dim: int) -> tuple[VectorIndex, list[Any]]:
