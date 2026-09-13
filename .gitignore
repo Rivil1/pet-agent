@@ -50,3 +50,5 @@ Dockerfile.local
 # OS
 .DS_Store
 Thumbs.db
+# 本地部署/提交用临时文件
+.git-commit-msg
