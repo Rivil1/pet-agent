@@ -1,0 +1,13 @@
+{
+  "venvPath": "/root/.venvs",
+  "venv": "pet-agent",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "include": ["app", "tests"],
+  "exclude": ["**/__pycache__", ".pytest_cache"],
+  "reportMissingTypeStubs": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportMissingImports": true
+}

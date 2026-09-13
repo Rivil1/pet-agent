@@ -1,0 +1,18 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+langgraph>=0.0.20
+# 观测与解析层是我们**直接 import** 的，所以显式声明依赖 ——
+# 靠 langgraph 的传递依赖会在它换实现时静默断掉。
+langchain-core>=1.0.0
+langsmith>=0.12.0
+httpx>=0.25.0
+librosa>=0.10.0
+numpy>=1.24.0
+soundfile>=0.12.0
+# 鉴权是自实现的 HMAC token（app/auth/token.py），**不用 JWT** ——
+# ARCHITECTURE §4.2 明确选了 HMAC 而不是 JWT（无跨服务 / 无第三方登录 / 无刷新令牌）。
+# 所以不需要 PyJWT。
+PyYAML>=6.0
+pytest>=7.4.0
+pyright>=1.1.300

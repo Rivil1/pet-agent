@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  # MySQL 主数据库
+  db:
+    image: mysql:8.4
+    container_name: pet-mysql
+    environment:
+      MYSQL_DATABASE: pet_agent
+      MYSQL_USER: pet_user
+      MYSQL_PASSWORD: ${DB_PASSWORD:-pet_password_change_me}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password_change_me}
+    ports:
+      - "3306:3306"
+    volumes:
+      - pet_mysql_data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-root_password_change_me}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+  # Milvus 向量数据库
+  milvus:
+    image: milvusdb/milvus:v2.4.6
+    container_name: pet-milvus
+    environment:
+      ETCD_USE_EMBED: true
+      COMMON_STORAG_TYPE: local
+    ports:
+      - "19530:19530"      # Milvus 服务端口
+      - "9091:9091"         # Milvus WebUI 端口
+    volumes:
+      - pet_milvus_data:/var/lib/milvus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: pet-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - pet_redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pet_mysql_data:
+  pet_milvus_data:
+  pet_redis_data:

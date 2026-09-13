@@ -1,0 +1,88 @@
+{
+  "version": "placeholder-v0",
+  "provenance": "placeholder",
+  "reviewed": false,
+  "is_placeholder": true,
+  "source": null,
+  "note": "⚠️ 本文件全部数值为占位值，不是实测统计。群体先验尚未构建（见 docs/DESIGN.md §7.3 U3）。标准差刻意取宽，用以表达「不确定」——窄标准差会产生过度自信的后验。替换为 CatMeows 实际统计量后，须同时更新 version 并把 provenance 改为 'catmeows'。",
+  "feature_specs": {
+    "duration": {"unit": "s", "desc": "单次叫声时长"},
+    "f0_mean": {"unit": "Hz", "desc": "基频均值，pyin 置信度 <0.15 的帧已剔除"},
+    "f0_range": {"unit": "Hz", "desc": "基频 P5–P95 跨度"},
+    "f0_slope": {"unit": "norm", "desc": "基频轮廓线性拟合斜率。方向性含义有文献支持：正向/亲和情境倾向上升"},
+    "call_rate": {"unit": "次/10s", "desc": "单位时间叫声次数，索求行为强度指标"},
+    "ici_mean": {"unit": "s", "desc": "相邻叫声间隔均值"},
+    "rms_mean": {"unit": "norm", "desc": "能量包络均值"},
+    "roughness": {"unit": "norm", "desc": "粗糙度，幅度调制深度"}
+  },
+  "base_rates": {
+    "greeting": 0.30,
+    "food_waiting": 0.25,
+    "door_attention": 0.15,
+    "affection_brushing": 0.12,
+    "other": 0.10,
+    "isolation_distress": 0.08
+  },
+  "contexts": {
+    "food_waiting": {
+      "duration": [0.45, 0.25],
+      "f0_mean": [550.0, 120.0],
+      "f0_range": [150.0, 80.0],
+      "f0_slope": [0.10, 0.35],
+      "call_rate": [4.0, 1.5],
+      "ici_mean": [0.60, 0.25],
+      "rms_mean": [0.15, 0.07],
+      "roughness": [0.20, 0.10]
+    },
+    "door_attention": {
+      "duration": [0.60, 0.30],
+      "f0_mean": [520.0, 130.0],
+      "f0_range": [180.0, 90.0],
+      "f0_slope": [0.05, 0.40],
+      "call_rate": [3.0, 1.5],
+      "ici_mean": [0.80, 0.35],
+      "rms_mean": [0.13, 0.06],
+      "roughness": [0.22, 0.11]
+    },
+    "affection_brushing": {
+      "duration": [0.40, 0.20],
+      "f0_mean": [450.0, 100.0],
+      "f0_range": [120.0, 70.0],
+      "f0_slope": [0.30, 0.30],
+      "call_rate": [2.0, 1.2],
+      "ici_mean": [1.20, 0.50],
+      "rms_mean": [0.10, 0.05],
+      "roughness": [0.15, 0.08]
+    },
+    "isolation_distress": {
+      "duration": [0.90, 0.45],
+      "f0_mean": [700.0, 150.0],
+      "f0_range": [250.0, 110.0],
+      "f0_slope": [-0.25, 0.40],
+      "call_rate": [5.5, 2.0],
+      "ici_mean": [0.45, 0.20],
+      "rms_mean": [0.20, 0.08],
+      "roughness": [0.30, 0.12]
+    },
+    "greeting": {
+      "duration": [0.35, 0.18],
+      "f0_mean": [500.0, 110.0],
+      "f0_range": [140.0, 75.0],
+      "f0_slope": [0.35, 0.30],
+      "call_rate": [1.5, 1.0],
+      "ici_mean": [1.50, 0.60],
+      "rms_mean": [0.11, 0.05],
+      "roughness": [0.14, 0.07]
+    },
+    "other": {
+      "duration": [0.55, 0.30],
+      "f0_mean": [540.0, 140.0],
+      "f0_range": [170.0, 95.0],
+      "f0_slope": [0.00, 0.45],
+      "call_rate": [3.0, 2.0],
+      "ici_mean": [0.85, 0.45],
+      "rms_mean": [0.14, 0.07],
+      "roughness": [0.20, 0.12]
+    }
+  }
+}

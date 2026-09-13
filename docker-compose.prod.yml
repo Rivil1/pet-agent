@@ -1,0 +1,80 @@
+# =============================================================================
+# pet-agent 生产环境 docker-compose
+# =============================================================================
+version: '3.8'
+
+services:
+  # 主应用
+  pet-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pet-agent
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - pet-network
+    volumes:
+      - pet-data:/app/data
+      - /etc/localtime:/etc/localtime:ro
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # Nginx 反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: pet-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - pet-agent
+    networks:
+      - pet-network
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: pet-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - pet-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  pet-network:
+    driver: bridge
+
+volumes:
+  pet-data:
+  redis-data:
+  nginx-logs:

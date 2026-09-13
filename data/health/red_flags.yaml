@@ -1,0 +1,258 @@
+# pet-agent · 健康红旗规则表
+#
+# ⚠️ 规则是「数据」，不是代码。设计目的是让执业兽医可以审核与维护，
+#    而不需要阅读或修改任何程序代码。
+#
+# 启用策略（本期决策）：
+#   仅启用「多来源兽医手册强一致」的规则。
+#   阈值型规则（不同来源给出的数值不一致）一律 enabled: false，待执业兽医审核。
+#
+# 代价模型（见 docs/07-health.md §9）：
+#   假阴性 >> 假阳性。红旗规则偏向过度触发，优化 recall 而非 precision。
+#   不得以「避免误报」为由抬高下列任何阈值。
+
+version: "2026.09.1"
+schema_version: 1
+reviewed_by: null          # 待执业兽医审核
+reviewed_at: null
+confidence_policy: >
+  多来源兽医手册（MSD / Merck / ACVS / 大学教学医院）一致者视为强依据，可启用。
+  单一来源或消费者科普来源者，视为待审核。
+
+# ─────────────────────────────────────────────────────────────
+# 信号词汇表：所有规则条件只能引用此处定义的信号。
+# 未定义的信号在规则加载时即报错，避免拼写错误导致规则静默失效。
+# ─────────────────────────────────────────────────────────────
+signal_vocabulary:
+  litter_box.visit_frequency:
+    type: number
+    unit: "次/窗口"
+    desc: "指定窗口内猫砂盆访问次数"
+  litter_box.urine_output:
+    type: enum
+    values: [none, few_drops, normal, large]
+    desc: "单次排尿量"
+  litter_box.straining:
+    type: boolean
+    desc: "是否出现用力/努责"
+  vocalization.context:
+    type: enum
+    values: [voiding_attempt, food_waiting, door_attention, isolation, unknown]
+    desc: "叫声发生的情境（由行为解释器提供）"
+  respiratory.pattern:
+    type: enum
+    values: [normal, open_mouth, labored, paradoxical]
+    desc: "呼吸模式"
+  respiratory.rate:
+    type: number
+    unit: "次/分"
+    desc: "静息呼吸频率"
+  neuro.consciousness:
+    type: enum
+    values: [alert, depressed, unresponsive]
+    desc: "意识状态"
+  neuro.seizure:
+    type: boolean
+    desc: "是否发生抽搐"
+  neuro.mobility:
+    type: enum
+    values: [normal, paresis, paralysis]
+    desc: "运动能力"
+  bleeding.uncontrolled:
+    type: boolean
+    desc: "是否出血不止"
+  toxin.suspected_ingestion:
+    type: boolean
+    desc: "是否疑似误食毒物"
+  gi.vomiting_frequency:
+    type: number
+    unit: "次/日"
+    desc: "呕吐频次"
+  gi.diarrhea:
+    type: boolean
+    desc: "是否腹泻"
+  general.demeanor:
+    type: enum
+    values: [normal, lethargic, agitated]
+    desc: "总体精神状态"
+  meal.hours_since_last_intake:
+    type: number
+    unit: "小时"
+    desc: "距上次进食时长"
+  mucosa.color:
+    type: enum
+    values: [normal, pale, icteric, cyanotic]
+    desc: "可视黏膜颜色"
+  weight.value:
+    type: number
+    unit: "kg"
+    desc: "体重"
+
+# ─────────────────────────────────────────────────────────────
+# 红旗规则
+# ─────────────────────────────────────────────────────────────
+rules:
+
+  # ══════════════ 已启用：多来源强一致 ══════════════
+
+  - id: urinary_obstruction
+    enabled: true
+    urgency: L3
+    species: [cat]
+    sex_bias: male          # 高发于公猫（尿道狭长弯曲）
+    title: "排尿困难 — 可能为尿道阻塞（尿闭）"
+    conditions:
+      any_of:
+        - signal: litter_box.urine_output
+          op: in
+          value: [none, few_drops]
+        - all_of:
+            - signal: litter_box.visit_frequency
+              op: ">="
+              value: 5
+              window: 2h
+            - signal: litter_box.straining
+              op: is_true
+    aggravating:
+      - signal: vocalization.context
+        op: equals
+        value: voiding_attempt
+        note: "排尿时嚎叫提示疼痛"
+      - signal: neuro.consciousness
+        op: in
+        value: [depressed, unresponsive]
+    message: >
+      频繁进出猫砂盆却几乎排不出尿、或排尿时用力嚎叫，是尿道阻塞的典型表现。
+      这属于急症：完全阻塞后 24–48 小时内可能危及生命，请立即就医，不要在家观察。
+      注意：这类表现常被误认为便秘。
+    action: "立即前往宠物医院急诊"
+    never_say_healthy: true
+    sources:
+      - https://www.msdvetmanual.com/urinary-system/urolithiasis-in-small-animals/urethral-obstruction-in-small-animals
+      - https://www.acvs.org/small-animal/urinary-obstruction-in-male-cats/
+      - https://www.petmd.com/cat/conditions/urinary/urinary-tract-blockage-cats
+      - https://vetmed.illinois.edu/pet-health-columns/blocked-cats-an-emergency-for-male-cats/
+
+  - id: respiratory_distress
+    enabled: true
+    urgency: L3
+    species: [cat]
+    title: "呼吸异常"
+    conditions:
+      any_of:
+        - signal: respiratory.pattern
+          op: in
+          value: [open_mouth, labored, paradoxical]
+    aggravating:
+      - signal: mucosa.color
+        op: in
+        value: [pale, cyanotic]
+    message: >
+      张口呼吸、呼吸费力或呼吸模式异常，在猫身上是需要紧急处理的表现。
+      请立即就医。运送途中尽量保持安静，避免应激。
+    action: "立即前往宠物医院急诊"
+    never_say_healthy: true
+    sources:
+      - https://www.merckvetmanual.com/
+
+  - id: neurological_emergency
+    enabled: true
+    urgency: L3
+    species: [cat]
+    title: "神经症状"
+    conditions:
+      any_of:
+        - signal: neuro.seizure
+          op: is_true
+        - signal: neuro.consciousness
+          op: equals
+          value: unresponsive
+        - signal: neuro.mobility
+          op: equals
+          value: paralysis
+    message: >
+      抽搐、意识不清或突然瘫痪属于急症表现，请立即就医。
+      记录发作时间与持续时长，拍照或录像对兽医判断有帮助。
+    action: "立即前往宠物医院急诊"
+    never_say_healthy: true
+    sources:
+      - https://www.merckvetmanual.com/
+
+  - id: hemorrhage_or_toxin
+    enabled: true
+    urgency: L3
+    species: [cat]
+    title: "出血不止 / 疑似中毒"
+    conditions:
+      any_of:
+        - signal: bleeding.uncontrolled
+          op: is_true
+        - signal: toxin.suspected_ingestion
+          op: is_true
+    message: >
+      出血不止或疑似误食毒物，请立即就医。
+      若疑似中毒，请一并带上可疑物品或其包装，便于兽医判断。
+    action: "立即前往宠物医院急诊"
+    never_say_healthy: true
+    sources:
+      - https://www.merckvetmanual.com/
+
+  # ══════════════ 待审核：阈值型或来源一致性不足 ══════════════
+
+  - id: anorexia_prolonged
+    enabled: false
+    urgency: L2
+    species: [cat]
+    title: "持续不进食"
+    conditions:
+      all_of:
+        - signal: meal.hours_since_last_intake
+          op: ">="
+          value: null            # ⚠️ 阈值待执业兽医确认
+    message: >
+      猫持续不进食需要重视（存在肝脂沉积等风险），建议尽快联系兽医。
+    action: "联系兽医，必要时就诊"
+    never_say_healthy: true
+    disabled_reason: >
+      不同来源给出的时间阈值不一致。本表不自行断言数值。
+      待执业兽医审核确认后填入 value 并置 enabled: true。
+    sources: []
+
+  - id: persistent_gi_signs
+    enabled: false
+    urgency: L2
+    species: [cat]
+    title: "持续呕吐 / 腹泻伴精神萎靡"
+    conditions:
+      all_of:
+        - signal: gi.vomiting_frequency
+          op: ">="
+          value: null            # ⚠️ 阈值待审核
+        - signal: general.demeanor
+          op: equals
+          value: lethargic
+    message: >
+      持续呕吐或腹泻并伴随精神萎靡，建议尽快联系兽医。
+    action: "联系兽医，必要时就诊"
+    never_say_healthy: true
+    disabled_reason: "阈值待执业兽医确认；目前仅有消费者科普来源，非兽医手册。"
+    sources: []
+
+  - id: mucosa_abnormal
+    enabled: false
+    urgency: L2
+    species: [cat]
+    title: "可视黏膜颜色异常"
+    conditions:
+      any_of:
+        - signal: mucosa.color
+          op: in
+          value: [pale, icteric]
+    message: >
+      牙龈等可视黏膜颜色异常（苍白或黄染），建议尽快联系兽医。
+    action: "联系兽医，必要时就诊"
+    never_say_healthy: true
+    disabled_reason: >
+      依赖用户对颜色的主观判断，可靠性未经验证；
+      可由用户上传照片由视觉模型辅助判定后再启用。
+    sources: []
