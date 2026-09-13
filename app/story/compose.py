@@ -41,6 +41,7 @@ from datetime import datetime
 
 from app.schemas.digest import DailySummary, DigestCandidate, DigestMessage
 from app.schemas.memory import EventType
+from app.schemas.timeofday import bucket_of
 from app.schemas.story import (
     ENTERTAINABLE_EVENT_TYPES,
     ENTERTAINABLE_SOURCES,
@@ -53,24 +54,18 @@ from app.schemas.story import (
     find_physiology_words,
 )
 
-#: 早/午/晚/夜的本地小时边界。
-#:
-#: 用消息时间戳切分；无时间戳时归入 `EVENING`（一天的中位，且不猜）。
-_HOUR_BUCKETS: tuple[tuple[range, StoryTimeOfDay], ...] = (
-    (range(5, 12), StoryTimeOfDay.MORNING),
-    (range(12, 18), StoryTimeOfDay.AFTERNOON),
-    (range(18, 23), StoryTimeOfDay.EVENING),
-)
-
-
 def _time_of_day(occurred_at: datetime | None) -> StoryTimeOfDay:
+    """时段划分。边界定义在 `app/schemas/timeofday.py`（全项目唯一）。
+
+    无时间戳时归入 `EVENING` —— 那是**故事分段**的取舍：
+    它要的是一天的叙事分段，缺一段就不完整，而晚上是一天的中位且不猜具体时段。
+
+    （习惯统计的取舍不同：它**排除**时间未知的条目，
+    因为把未知塞进某个桶等于往统计里掺假数据。见 `app/habits/detect.py`。）
+    """
     if occurred_at is None:
         return StoryTimeOfDay.EVENING
-    hour = occurred_at.hour
-    for hours, slot in _HOUR_BUCKETS:
-        if hour in hours:
-            return slot
-    return StoryTimeOfDay.NIGHT
+    return bucket_of(occurred_at)
 
 
 def _classify(

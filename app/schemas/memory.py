@@ -152,6 +152,19 @@ class WriteAction(str, Enum):
 # ─────────────────────────────────────────────────────────────
 
 
+#: 主体无法从内容识别时的回退前缀。
+#:
+#: `_guess_subject`（`app/graph/nodes.py`）认不出内容时返回
+#: `misc:<哈希>`。放在契约层是因为**两个不同层次都要用它**：
+#:
+#: - 编排层：生成回退值
+#: - 习惯层：识别「这条的主体是猜的」，并**显式报告**（`app/habits/detect.py`）
+#:
+#: 让习惯层去 import 编排层的常量会造成分层倒置 ——
+#: 领域逻辑不该依赖图编排。
+SUBJECT_FALLBACK_PREFIX = "misc:"
+
+
 class MemoryEvent(BaseModel):
     """一条长期记忆。"""
 

@@ -57,6 +57,7 @@ from app.schemas.input import (
     policy_for,
 )
 from app.schemas.memory import (
+    SUBJECT_FALLBACK_PREFIX,
     ASR_CONFIDENCE_DISCOUNT,
     EVENT_HALFLIFE_DAYS,
     LAYER_ACCESS_MODE,
@@ -173,6 +174,7 @@ __all__ = [
     "FAST_PATH_INTENTS",
     "INTENT_POLICIES",
     "MISROUTE_COSTS",
+    "SUBJECT_FALLBACK_PREFIX",
     "misroute_cost",
     "policy_for",
     # ── guard ──

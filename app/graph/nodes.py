@@ -37,6 +37,7 @@ from app.memory import (
 )
 from app.profile import VisionAnalyzer, identify_from_photos
 from app.schemas import (
+    SUBJECT_FALLBACK_PREFIX,
     FORBIDDEN_PHRASES,
     AudioKind,
     ConversationTurn,
@@ -1106,7 +1107,38 @@ def extract_candidates(state: AgentState) -> AgentState:
 
 
 #: 主体识别规则：从内容里提取「关于什么」的键。用于冲突检测的「同主体」判定。
+#:
+#: ## 两组词的作用不同
+#:
+#: - **物品类**（vacuum / food / …）：冲突检测靠它。主人说「它现在不怕吸尘器了」
+#:   与旧的「它怕吸尘器」必须能归到同一个主体，否则冲突永远检测不到。
+#: - **惯例类**（wake_up / meowing / …）：**习惯聚合**靠它。
+#:   主人分三次说「六点叫我起床」「六点准时叫我」「六点又把我叫醒了」，
+#:   那是**同一件事说了三次**，不归组的话习惯永远形成不了 ——
+#:   而「说过三次」正是习惯的唯一依据。
+#:
+#: ⚠️ 词表永远不可能完整（真正的语义归类需要模型，而模型不可复现）。
+#: 所以剩下那些会落到 `_guess_subject` 的哈希回退，
+#: 而 `app/habits/detect.py` 会**显式报告**「有多少条主体无法识别」——
+#: 不假装它们已经正确分组了。
 _SUBJECT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ── 惯例类（习惯聚合主要靠这组）──
+    ("wake_up", (
+        "叫我起床", "叫醒", "叫我起来", "喊我起床", "叫我早",
+        # 更宽的问法：「六点准时叫我」「早上叫我」都指向同一件事。
+        # 放宽的代价：极少数「叫我」其实与起床无关（如「它不喜欢我叫它名字」）。
+        # 那个代价**很小** —— 它们会归到同一个主体下，而习惯层还需要
+        # 次数与跨天重复才会声称习惯，单靠主体相同并不会凭空造出一个习惯。
+        "准时叫", "早上叫", "叫我",
+    )),
+    ("meowing", ("一直叫", "不停地叫", "叫个不停", "喵喵叫", "半夜叫")),
+    ("begging", ("讨食", "要吃的", "要饭", "讨吃的", "蹭腿要")),
+    ("sleeping", ("睡觉", "睡在", "午睡", "打盹", "睡姿")),
+    ("playing", ("玩玩具", "自己玩", "追着玩", "疯跑")),
+    ("grooming", ("舔毛", "梳毛", "舔爪子", "自己清理")),
+    ("hiding", ("躲起来", "藏着", "躲到", "钻到")),
+    ("purring", ("呼噜", "打呼", "咕噜")),
+    # ── 物品类（冲突检测主要靠这组）──
     ("vacuum", ("吸尘器", "吸尘")),
     ("cat_wand", ("逗猫棒", "逗猫")),
     ("scratching_post", ("猫抓板", "抓板")),
@@ -1118,17 +1150,26 @@ _SUBJECT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("stranger", ("陌生人", "生人")),
 )
 
+
 _NEGATIVE_CUES = ("怕", "不喜欢", "讨厌", "不敢", "躲", "害怕", "抗拒", "拒绝")
 
 
 def _guess_subject(content: str) -> str:
-    """猜主体。未识别到则用内容的哈希前缀 —— 保证「不同内容不会误判为同主体」。"""
+    """猜主体。未识别到则用内容的哈希前缀 —— 保证「不同内容不会误判为同主体」。
+
+    哈希回退的好处是**安全**：它不可能把两件不同的事误判为同主体
+    （冲突检测靠这一点）。代价是**同样的话换个说法也不归组** ——
+    那个代价由习惯层显式报告，而不是在这里用一个更激进的匹配去换
+    （误合并会让系统声称一个不存在的习惯，比漏掉更糟）。
+    """
     for subject, keywords in _SUBJECT_HINTS:
         if any(kw in content for kw in keywords):
             return subject
     import hashlib
 
-    return "misc:" + hashlib.blake2b(content.encode("utf-8"), digest_size=4).hexdigest()
+    return SUBJECT_FALLBACK_PREFIX + hashlib.blake2b(
+        content.encode("utf-8"), digest_size=4
+    ).hexdigest()
 
 
 def _guess_polarity(content: str) -> Polarity:

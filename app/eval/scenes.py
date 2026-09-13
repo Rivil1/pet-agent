@@ -1299,6 +1299,181 @@ _scene_acoustic_blocked = _scene_acoustic_holdout
 
 
 # =============================================================================
+# 场景 12：习惯聚合（新增能力）
+# =============================================================================
+
+
+def _scene_habits(ctx: Any) -> SceneOutcome:
+    """习惯聚合：**从主人的记录里数出稳定模式**。
+
+    ## 为什么习惯可验证，而「猫的心思」不可验证
+
+    习惯回答三个可数的问题：**发生过几次、在什么时候、有多规律**。
+    三个都能由代码从已存储的事件重算 —— 所以这是本项目里少有的、
+    可以声称绝对数值的能力（与行为解释的谨慎形成对照）。
+
+    本场景测四件事：
+
+    1. **计数可复算** —— 报告里的数字能由输入推出
+    2. **观察不足时不声称习惯** —— 而不是给一个「弱习惯」分数
+    3. **时段统计不回退到记录时间** —— 否则会算出一个看起来正常的错误分布
+    4. **因果问题被显式拒绝** —— 「为什么」与「吗」只差一个字，
+       但拿观察记录回答因果，是一个看起来像答案的东西
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.habits import HabitStrength, detect_habits
+    from app.habits.answer import answer_habit_question
+    from app.schemas import (
+        EventType,
+        MemoryEvent,
+        MemorySource,
+        MemoryStatus,
+        Polarity,
+    )
+
+    now = datetime(2026, 9, 14, 8, 0, tzinfo=timezone.utc)
+
+    def ev(
+        subject: str,
+        content: str,
+        days_ago: int,
+        hour: int,
+        *,
+        occurred: bool = True,
+        support: int = 1,
+    ) -> MemoryEvent:
+        at = (now - timedelta(days=days_ago)).replace(hour=hour)
+        return MemoryEvent(
+            user_id="u1",
+            pet_id="p1",
+            subject=subject,
+            content=content,
+            event_type=EventType.ROUTINE,
+            polarity=Polarity.NEUTRAL,
+            source=MemorySource.USER_OBSERVATION,
+            status=MemoryStatus.ACTIVE,
+            confidence=0.9,
+            support_count=support,
+            # 部分记录**故意不带发生时间**，测「时段统计不回退」
+            occurred_at=at if occurred else None,
+            created_at=at,
+        )
+
+    events = [
+        # 已形成：6 次 / 6 天 / 固定早上 6 点
+        *[ev("wake_up", "每天早上六点会来叫我起床", d, 6) for d in (20, 16, 12, 9, 6, 2)],
+        # 刚有苗头：2 次 / 2 天
+        *[ev("vacuum", "它很怕吸尘器", d, 14) for d in (9, 3)],
+        # 不足以判断：1 次
+        ev("sofa", "偶尔抓沙发", 1, 15),
+        # 无发生时间：只参与次数/天数，不参与时段
+        ev("food", "爱吃三文鱼罐头", 7, 18, occurred=False),
+        ev("food", "爱吃三文鱼罐头", 5, 19, occurred=False),
+    ]
+
+    report = detect_habits(events)
+    by_subject = {h.subject: h for h in report.habits}
+
+    wake = by_subject.get("wake_up")
+    vacuum = by_subject.get("vacuum")
+    food = by_subject.get("food")
+
+    # ── 1. 计数可复算 ──
+    counts_ok = bool(
+        wake
+        and wake.observations == 6
+        and wake.distinct_days == 6
+        and wake.strength is HabitStrength.ESTABLISHED
+    )
+
+    # ── 2. 观察不足时不声称习惯 ──
+    insufficient_ok = bool(
+        vacuum
+        and vacuum.strength is not HabitStrength.ESTABLISHED
+        and vacuum.limitations
+    )
+
+    # ── 3. 时段统计不回退到记录时间 ──
+    # food 那两条**只有 created_at**（都是傍晚18/19点），
+    # 如果时段统计回退了，它会得到一个「晚上 100%」的分布 ——
+    # 而那完全是编的。
+    timing_ok = bool(food and food.time_histogram == {})
+    timing_note = bool(food and any("occurred_at" in n for n in food.limitations))
+
+    # ── 4. 因果问题被拒绝 ──
+    causal = answer_habit_question(report, "它为什么六点叫我起床")
+    causal_ok = bool(causal and ("没有原因" in causal or "不推断因果" in causal))
+
+    # ── 5. 主题无记录时不从别的习惯推 ──
+    unrelated = answer_habit_question(report, "它喜欢什么玩具")
+    unrelated_ok = unrelated is None
+
+    return SceneOutcome(
+        metrics={
+            "识别出的模式数": float(len(report.habits)),
+            "已形成习惯数": float(len(report.established())),
+            "参与聚合事件数": float(report.considered_events),
+            "时段集中度": float(wake.time_concentration) if wake else 0.0,
+        },
+        checks=[
+            Check(
+                "计数可由输入复算",
+                counts_ok,
+                f"期望 6 次/6 天，实际 "
+                f"{wake.describe_counts() if wake else '未识别'}",
+            ),
+            Check(
+                "观察不足时不声称习惯",
+                insufficient_ok,
+                f"vacuum 强度={vacuum.strength.value if vacuum else '未识别'}",
+            ),
+            Check(
+                "时段统计不回退到记录时间",
+                timing_ok,
+                f"实际直方图={dict(food.time_histogram) if food else {}} —— "
+                f"非空说明用了 created_at 充数，那是编造时间数据",
+            ),
+            Check(
+                "时段排除有逐条说明",
+                timing_note,
+                "用户看到时段统计时必须知道有多少条未参与",
+            ),
+            Check(
+                "因果问题被显式拒绝",
+                causal_ok,
+                f"实际回复：{(causal or '')[:70]}",
+            ),
+            Check(
+                "无记录的主题不从别的习惯推",
+                unrelated_ok,
+                f"实际回复：{(unrelated or '')[:70]}",
+            ),
+        ],
+        notes=[
+            "习惯是本项目里少有的**可以声称绝对数值**的能力："
+            "次数/天数/时段占比全部由代码从已存储事件重算（D7：LLM 不产生数字）",
+            "与「猫的心思」的区别：习惯回答「发生过几次、什么时候、多规律」，"
+            "三个都可验证；「它想要什么」不可验证（D29）",
+            "阈值与记忆飞轮的 PROMOTION_MIN_SUPPORT 对齐（都是 3）——"
+            "两处用不同数字会让「已晋升为长期事实」与「已形成习惯」互相矛盾",
+        ],
+        details=[
+            {
+                "subject": h.subject,
+                "observations": h.observations,
+                "distinct_days": h.distinct_days,
+                "strength": h.strength.value,
+                "trend": h.trend.value,
+                "dominant_time": h.dominant_time.value if h.dominant_time else None,
+            }
+            for h in report.habits
+        ],
+        samples=report.considered_events,
+    )
+
+
+# =============================================================================
 # 注册表
 # =============================================================================
 
@@ -1391,6 +1566,14 @@ ALL_SCENES: tuple[Scene, ...] = (
         items=("E21",),
         question="群体先验能识别没见过的猫的情绪吗？",
         run=_scene_acoustic_holdout,
+    ),
+    Scene(
+        scene_id="habits",
+        name="习惯聚合",
+        layer=Layer.A,
+        items=("E35",),
+        question="能从主人的记录里数出这只猫的稳定模式吗？",
+        run=_scene_habits,
     ),
 )
 

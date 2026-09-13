@@ -56,6 +56,7 @@ from datetime import date as date_type
 from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
+from app.schemas.timeofday import TimeOfDay
 
 from app.schemas.digest import ExtractionSource
 from app.schemas.memory import EventType
@@ -145,11 +146,12 @@ class StoryTone(str, Enum):
     """严肃。**健康层必须用这个。**"""
 
 
-class StoryTimeOfDay(str, Enum):
-    MORNING = "morning"
-    AFTERNOON = "afternoon"
-    EVENING = "evening"
-    NIGHT = "night"
+#: 故事用的时段。
+#:
+#: ⚠️ **它是 `TimeOfDay` 的别名，不是另一个枚举。**
+#: 时段边界必须全项目唯一（见 `app/schemas/timeofday.py`）——
+#: 两份定义会在某个边界上悄悄不一致，而那种不一致是静默的。
+StoryTimeOfDay = TimeOfDay
 
 
 _TIME_DISPLAY: dict[StoryTimeOfDay, str] = {

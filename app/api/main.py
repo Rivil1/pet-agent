@@ -27,6 +27,8 @@ from app.auth import InvalidToken, bearer_token, verify_token
 from app.auth.token import DEFAULT_TTL_SECONDS, issue_token
 from app.digest import summarize_day
 from app.graph import build_graph, initial_state, tenant_of
+from app.habits import detect_habits
+from app.habits.answer import render_habit_report
 from app.health import HealthWriter, InMemoryHealthStore, RedFlagTable
 from app.interpreter import PriorTable
 from app.llm import UNTRUSTED_MODES, Embedder, LLMClient, describe_providers
@@ -861,6 +863,74 @@ def create_app(
                 for m in memories
             ],
         }
+
+    @app.get("/v1/pets/{pet_id}/habits")
+    def list_habits(
+        pet_id: str,
+        user_id: str = Depends(current_user),
+        text: bool = False,
+    ) -> dict[str, Any]:
+        """这只猫的习惯。**全部数字由代码聚合得出，不经过任何模型。**
+
+        `text=true` 时额外返回一段渲染好的说明（同样不经模型）。
+
+        与 `GET /v1/memories` 的分工：
+
+        | 端点 | 回答 |
+        |---|---|
+        | `/v1/memories` | 原始记忆条目（**逐条**）|
+        | `/v1/habits` | 从这些条目**聚合**出的模式（次数/天数/时段/规律性）|
+
+        两者都需要：前者可核对，后者可回答「它有什么习惯」——
+        而那是聚合问题，不是相似度问题（`docs/06-roadmap.md` §5.1）。
+        """
+        owned_pet(user_id, pet_id)
+
+        # **租户过滤在 store 层完成**：`list_habits` 不做租户检查。
+        # 把过滤下推到查询而不是在这里再筛一遍 —— 后者会让人
+        # 以为「不过滤也安全」。
+        memories = store.list_memories(
+            user_id=user_id, pet_id=pet_id, include_non_active=True
+        )
+        report = detect_habits(memories)
+
+        payload: dict[str, Any] = {
+            "considered_events": report.considered_events,
+            "skipped_events": report.skipped_events,
+            "skip_reasons": report.skip_reasons,
+            "limitations": list(report.limitations),
+            "established_count": len(report.established()),
+            "habits": [
+                {
+                    "subject": h.subject,
+                    "content": h.content,
+                    "event_type": h.event_type.value,
+                    "strength": h.strength.value,
+                    "trend": h.trend.value,
+                    # 计数：每一个都能由存储的事件重算
+                    "observations": h.observations,
+                    "distinct_days": h.distinct_days,
+                    "span_days": h.span_days,
+                    "first_seen": h.first_seen.isoformat(),
+                    "last_seen": h.last_seen.isoformat(),
+                    # 时间分布
+                    "time_histogram": {
+                        k.value: v for k, v in h.time_histogram.items()
+                    },
+                    "dominant_time": h.dominant_time.value if h.dominant_time else None,
+                    "time_concentration": h.time_concentration,
+                    "regularity": h.regularity,
+                    # 可核对：哪些记忆支撑这条习惯
+                    "evidence_ids": list(h.evidence_ids),
+                    # 为什么不能声称更多（**空的才是可疑的**）
+                    "limitations": list(h.limitations),
+                }
+                for h in report.habits
+            ],
+        }
+        if text:
+            payload["text"] = render_habit_report(report)
+        return payload
 
     return app
 
