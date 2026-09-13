@@ -1,0 +1,279 @@
+@import '@fontsource-variable/fraunces';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =============================================================================
+   设计系统：田野笔记 (Field Notebook)
+   -----------------------------------------------------------------------------
+   这不是装饰性选择。项目的核心主张是「知识对象是主人的经验」，
+   并为此建立了严格的证据分层（MEASURED / OBSERVED / INFERRED / 主人标注）。
+   田野笔记正是这种东西：**每条观察都带出处**。
+
+   所以视觉语言直接编码了产品的诚实性主张：
+   纸 = 记录介质，墨 = 确定性，虚线/点线 = 不确定，印章 = 出处。
+   ========================================================================== */
+
+:root {
+  /* 纸与墨 —— 暖色，不是标准「白底」 */
+  --paper: 242 236 224;
+  --paper-raised: 250 246 237;
+  --paper-sunk: 232 223 205;
+  --rule: 217 205 182;
+  --ink: 36 31 26;
+  --ink-soft: 85 76 64;
+  --ink-faint: 139 128 115;
+
+  /* 主强调色：柿红。刻意避开紫蓝渐变那套通用 AI 审美 */
+  --persimmon: 193 80 46;
+  --persimmon-deep: 143 58 32;
+
+  /* 证据分层的专用色 —— 每一层一个「墨色」 */
+  --moss: 76 99 64; /* MEASURED：可重算 → 沉稳 */
+  --ochre: 176 132 35; /* OBSERVED：模型描述 → 未校验 */
+  --plum: 107 74 90; /* INFERRED：统计推断 → 间接 */
+  --brick: 158 53 36; /* 危险 */
+
+  color-scheme: light;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: rgb(var(--paper));
+  color: rgb(var(--ink));
+  font-family:
+    'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Noto Sans CJK SC', ui-sans-serif,
+    system-ui, sans-serif;
+  font-feature-settings: 'kern';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+/* -----------------------------------------------------------------------------
+   纸纹：两层叠加 —— 细颗粒 + 极淡的横向格线。
+   颗粒用 SVG feTurbulence 生成，不依赖外部图片。
+   -------------------------------------------------------------------------- */
+.paper-grain::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.32;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='0.42'/%3E%3C/svg%3E");
+}
+
+.paper-vignette::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(
+    120% 80% at 50% 0%,
+    transparent 40%,
+    rgb(var(--ink) / 0.055) 100%
+  );
+}
+
+/* -----------------------------------------------------------------------------
+   装订线：卡片左侧的竖线 + 打孔，模仿活页笔记
+   -------------------------------------------------------------------------- */
+.binding {
+  position: relative;
+}
+.binding::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgb(var(--persimmon) / 0.5) 0 6px,
+    transparent 6px 11px
+  );
+}
+
+/* 笔记本横向格线 */
+.ruled {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 calc(1.75rem - 1px),
+    rgb(var(--rule) / 0.55) calc(1.75rem - 1px) 1.75rem
+  );
+  line-height: 1.75rem;
+}
+
+/* -----------------------------------------------------------------------------
+   证据分层：视觉语言的核心。
+   四种边框形态 = 四种可信度来源。用户不需要读图例也能感到区别。
+   -------------------------------------------------------------------------- */
+.ev {
+  @apply inline-flex items-center gap-1 whitespace-nowrap rounded-[2px] px-1.5 py-[3px] text-[10px] font-semibold uppercase tracking-[0.09em];
+}
+.ev-measured {
+  border: 1.5px solid rgb(var(--moss));
+  color: rgb(var(--moss));
+  background: rgb(var(--moss) / 0.07);
+}
+.ev-observed {
+  border: 1.5px dashed rgb(var(--ochre));
+  color: rgb(var(--ochre));
+  background: rgb(var(--ochre) / 0.07);
+}
+.ev-inferred {
+  border: 1.5px dotted rgb(var(--plum));
+  color: rgb(var(--plum));
+  background: rgb(var(--plum) / 0.07);
+}
+.ev-owner {
+  border: 1.5px solid rgb(var(--persimmon));
+  color: rgb(var(--persimmon-deep));
+  background: rgb(var(--persimmon) / 0.09);
+  font-family: 'Fraunces Variable', serif;
+  font-style: italic;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-size: 11px;
+}
+
+/* -----------------------------------------------------------------------------
+   印章：略微倾斜 + 描边，用于「已确认」「未校验」这类状态
+   -------------------------------------------------------------------------- */
+.stamp {
+  @apply inline-flex items-center gap-1 border-[1.5px] px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.14em];
+  transform: rotate(-3deg);
+  border-radius: 2px;
+  opacity: 0.92;
+}
+
+/* 下划线笔触（主人标注的手写感） */
+.underline-ink {
+  background-image: linear-gradient(
+    to right,
+    rgb(var(--persimmon) / 0.85) 0%,
+    rgb(var(--persimmon) / 0.55) 60%,
+    rgb(var(--persimmon) / 0.2) 100%
+  );
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 100% 2px;
+  padding-bottom: 2px;
+}
+
+/* 胶带装饰 */
+.tape {
+  position: relative;
+}
+.tape::before {
+  content: '';
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  width: 64px;
+  height: 18px;
+  transform: translateX(-50%) rotate(-2.5deg);
+  background: rgb(var(--rule) / 0.7);
+  border-left: 1px dashed rgb(var(--paper-raised) / 0.9);
+  border-right: 1px dashed rgb(var(--paper-raised) / 0.9);
+  box-shadow: 0 1px 3px rgb(var(--ink) / 0.12);
+}
+
+/* -----------------------------------------------------------------------------
+   表单与控件
+   -------------------------------------------------------------------------- */
+.field {
+  @apply w-full rounded-[3px] border border-rule bg-paper-raised px-3 py-2.5 text-[15px] text-ink outline-none transition;
+  box-shadow: inset 0 1px 2px rgb(var(--ink) / 0.06);
+}
+.field::placeholder {
+  color: rgb(var(--ink-faint) / 0.75);
+}
+.field:focus {
+  border-color: rgb(var(--persimmon) / 0.65);
+  box-shadow:
+    inset 0 1px 2px rgb(var(--ink) / 0.06),
+    0 0 0 3px rgb(var(--persimmon) / 0.13);
+}
+
+.btn {
+  @apply inline-flex select-none items-center justify-center gap-2 rounded-[3px] px-4 py-2.5 text-[14px] font-semibold transition active:scale-[0.975] disabled:cursor-not-allowed disabled:opacity-45;
+}
+.btn-primary {
+  @apply btn text-paper-raised;
+  background: rgb(var(--persimmon));
+  box-shadow: 0 2px 0 rgb(var(--persimmon-deep));
+}
+.btn-primary:hover:not(:disabled) {
+  background: rgb(var(--persimmon) / 0.92);
+}
+.btn-ghost {
+  @apply btn border border-rule bg-paper-raised text-ink-soft;
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: rgb(var(--ink-faint) / 0.55);
+  color: rgb(var(--ink));
+}
+.btn-quiet {
+  @apply btn text-ink-soft;
+}
+.btn-quiet:hover:not(:disabled) {
+  color: rgb(var(--ink));
+}
+
+.card {
+  @apply rounded-card border border-rule bg-paper-raised;
+  box-shadow: 0 1px 0 0 rgb(var(--rule)), 0 2px 10px -6px rgb(var(--ink) / 0.25);
+}
+
+/* 分隔虚线 */
+.hr-dashed {
+  height: 0;
+  border-top: 1px dashed rgb(var(--rule));
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-faint) / 0.32);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 安全区（刘海屏） */
+.pb-safe {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);
+}
+.pt-safe {
+  padding-top: max(env(safe-area-inset-top, 0px), 0.5rem);
+}

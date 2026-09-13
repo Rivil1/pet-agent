@@ -1,80 +1,141 @@
 # =============================================================================
-# pet-agent 生产环境 docker-compose
+# pet-agent 生产环境
+#
+# 拓扑：
+#   web (nginx + 静态产物)  ──/v1──►  pet-agent (uvicorn)
+#        ↑ 唯一对外暴露的入口
+#
+# 为什么后端不直接暴露端口：所有请求都应经过同一层，
+# 否则会出现「绕过 Nginx 直连 8000」的路径，而那条路径没有安全头、
+# 没有压缩、也没有统一的超时设置 —— 一个只在生产才存在的差异。
+#
+# mysql / milvus 用 profiles 挂起：目前存储层仍是 InMemoryStore
+# （见 app/store/memory.py），起了也接不上，白占资源。
+# 接入后去掉 profiles 即可。
 # =============================================================================
-version: '3.8'
 
 services:
-  # 主应用
+  # ── 前端 + 反向代理 ──────────────────────────────────
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: pet-agent-web:latest
+    container_name: pet-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # 配好证书后打开
+      # - "443:443"
+    depends_on:
+      pet-agent:
+        condition: service_healthy
+    networks:
+      - pet-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ── 后端 ─────────────────────────────────────────────
   pet-agent:
     build:
       context: .
       dockerfile: Dockerfile
+    image: pet-agent-api:latest
     container_name: pet-agent
     restart: unless-stopped
+    # 只在回环上暴露，便于服务器本机排查；不对外
     ports:
       - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
-    env_file:
-      - .env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 20s
     networks:
-      - pet-network
-    volumes:
-      - pet-data:/app/data
-      - /etc/localtime:/etc/localtime:ro
+      - pet-net
     deploy:
       resources:
         limits:
-          memory: 2G
-        reservations:
-          memory: 512M
+          memory: 1500M
 
-  # Nginx 反向代理
-  nginx:
-    image: nginx:alpine
-    container_name: pet-nginx
+  # ── 数据服务（接入后启用） ───────────────────────────
+  #
+  # 用法：docker compose --profile data up -d
+  #
+  # MySQL：主库（宠物档案 / 记忆 / 会话 / 健康记录）
+  mysql:
+    profiles: ["data"]
+    image: mysql:8.4
+    container_name: pet-mysql
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-pet_agent}
+      MYSQL_USER: ${MYSQL_USER:-pet_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 必填}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-      - nginx-logs:/var/log/nginx
-    depends_on:
-      - pet-agent
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
     networks:
-      - pet-network
+      - pet-net
 
-  # Redis 缓存
+  # Milvus：向量库（语义召回）
+  #
+  # 用 standalone + 内置 etcd（ETCD_USE_EMBED）省掉两个额外容器 ——
+  # 单机小规模下外置 etcd 没有收益，只是多两个要维护的东西。
+  milvus:
+    profiles: ["data"]
+    image: milvusdb/milvus:v2.4.15
+    container_name: pet-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      COMMON_STORAGETYPE: local
+    volumes:
+      - milvus-data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - pet-net
+
   redis:
+    profiles: ["data"]
     image: redis:7-alpine
     container_name: pet-redis
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
     networks:
-      - pet-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+      - pet-net
 
 networks:
-  pet-network:
+  pet-net:
     driver: bridge
 
 volumes:
-  pet-data:
+  mysql-data:
+  milvus-data:
   redis-data:
-  nginx-logs:

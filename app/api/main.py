@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, time, timedelta, timezone
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.auth import InvalidToken, bearer_token, verify_token
+from app.auth.token import DEFAULT_TTL_SECONDS, issue_token
 from app.digest import summarize_day
 from app.graph import build_graph, initial_state, tenant_of
 from app.health import HealthWriter, InMemoryHealthStore, RedFlagTable
@@ -56,6 +58,30 @@ _RED_FLAGS_PATH = (
     Path(__file__).resolve().parent.parent.parent / "data" / "health" / "red_flags.yaml"
 )
 
+#: 开发登录开关。**默认关闭** —— 详见 `dev_login` 端点的 docstring。
+ENV_ALLOW_DEV_LOGIN = "PET_AGENT_ALLOW_DEV_LOGIN"
+
+
+def _env_flag(name: str) -> bool:
+    """读一个布尔环境变量。只有显式真值才算开。"""
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _pet_brief(pet: PetProfile) -> dict[str, Any]:
+    """宠物的列表视图。**不含 ``user_id``** —— 客户端不需要，也不该看到归属键。"""
+    visual = pet.visual
+    return {
+        "pet_id": pet.pet_id,
+        "name": pet.name,
+        "species": pet.species.value if hasattr(pet.species, "value") else str(pet.species),
+        "breed": pet.breed,
+        "has_profile": bool(pet.must_keep_features) or bool(visual.fur_color),
+        "must_keep_features": list(pet.must_keep_features),
+        "fur_color": visual.fur_color,
+        "eye_color": visual.eye_color,
+        "created_at": pet.created_at.isoformat(),
+    }
+
 # ─────────────────────────────────────────────────────────────
 # 请求 / 响应模型
 # ─────────────────────────────────────────────────────────────
@@ -64,6 +90,18 @@ _RED_FLAGS_PATH = (
 class CreatePetRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     breed: str | None = None
+
+
+class DevLoginRequest(BaseModel):
+    """开发/演示用的登录请求。
+
+    ⚠️ **只在 `PET_AGENT_ALLOW_DEV_LOGIN=1` 时可用**（默认关闭）。
+    理由：它接受任意 ``user_id`` 并签发合法 token —— 默认开启就等于
+    让 D5（多租户隔离）形同虚设：任何人都能伪造任意用户身份。
+    这是前端本地联调的便利开关，不是生产鉴权方案。
+    """
+
+    user_id: str = Field(min_length=1, max_length=64)
 
 
 class ProfileRequest(BaseModel):
@@ -267,6 +305,18 @@ def create_app(
     # 推断当前跑的是真模型还是占位（**不是传参** —— 调用方会忘，见 B22）
     provider_info = describe_providers(llm, embedder, vision)
 
+    def dev_login_enabled() -> bool:
+        """开发登录是否开启。**每次请求时读**，不在装配时冻结。
+
+        两个理由：
+        1. 它是**部署开关** —— 改了环境变量后重启即可生效，不该被装配顺序左右；
+        2. 冻结成局部变量会让「装配时机」变成一个隐蔽的依赖：
+           测试与运行时行为不一致，而那种不一致是静默的。
+
+        默认关闭的理由见 `dev_login` 端点。
+        """
+        return _env_flag(ENV_ALLOW_DEV_LOGIN)
+
     memory_writer = MemoryWriter(store=store, embedder=embedder)
     _health_store = health_store or InMemoryHealthStore()
     health_writer = HealthWriter(
@@ -338,6 +388,22 @@ def create_app(
             "status": "ok",
             "providers": provider_info,
             "observability": observability_info,
+            # 前端据此决定要不要显示「开发登录」入口。
+            # 暴露它是安全的：它只说明开关状态，不泄露密钥。
+            "dev_login": "enabled" if dev_login_enabled() else "disabled",
+        }
+
+    @app.get("/v1/pets")
+    def list_pets(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        """列出当前用户的全部宠物。
+
+        **按 token 派生的 ``user_id`` 过滤**，不接受任何客户端传入的归属参数 ——
+        这是 ``ARCHITECTURE.md`` §4.2 A1 的落点：归属只从凭证来。
+        """
+        pets = store.list_pets(user_id=user_id)
+        return {
+            "count": len(pets),
+            "pets": [_pet_brief(p) for p in pets],
         }
 
     @app.post("/v1/pets", status_code=status.HTTP_201_CREATED)
@@ -355,6 +421,39 @@ def create_app(
         )
         store.save_pet(pet)
         return {"pet_id": pet.pet_id, "name": pet.name}
+
+    @app.post("/v1/auth/dev-login")
+    def dev_login(body: DevLoginRequest) -> dict[str, Any]:
+        """开发/演示用签发 token。**默认关闭。**
+
+        开启方式::
+
+            PET_AGENT_ALLOW_DEV_LOGIN=1
+
+        为什么默认关闭：它签发**任意 user_id** 的合法 token。
+        默认开就等于把 D5（多租户隔离）取消 —— 隔离的前提是
+        ``user_id`` 不可伪造，而这里它完全可伪造。
+
+        生产环境请用 ``python -m app.bootstrap --issue-token <user>`` 签发，
+        或接入真实的登录体系。
+        """
+        if not dev_login_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "DEV_LOGIN_DISABLED",
+                    "message": (
+                        "开发登录未开启。设置 PET_AGENT_ALLOW_DEV_LOGIN=1 后重启，"
+                        "或使用 `python -m app.bootstrap --issue-token <user>` 签发 token。"
+                    ),
+                },
+            )
+        token = issue_token(body.user_id, secret=auth_secret, ttl_seconds=DEFAULT_TTL_SECONDS)
+        return {
+            "token": token,
+            "user_id": body.user_id,
+            "expires_in": DEFAULT_TTL_SECONDS,
+        }
 
     @app.post("/v1/pets/{pet_id}/profile")
     def build_profile(
