@@ -787,3 +787,123 @@ def test_mysql_backend_actually_selected(store: Any, backend_name: str):
         assert type(store).__name__ == "MySQLStore"
     else:
         assert isinstance(store, _MemStore)
+
+
+# =============================================================================
+# Milvus 返回值解析（不需要真实 Milvus）
+# =============================================================================
+
+
+class TestMilvusResultParsing:
+    """`count(*)` 与 hits 的解析。
+
+    ## 为什么值得单独测
+
+    这两段的输入形状**随 pymilvus 版本变化**，而写死一种的后果是
+    **静默返回 0 或空列表** —— 0 和 `[]` 恰好都是「看起来正常但其实是错的」那类值：
+
+    - 计数解析失败的后果：`/healthz` 报 `vector.count: 0`，
+      运维据此以为索引没生效，去跑一次白做的回填
+    - hits 解析失败的后果：**检索永远返回空**，而用户看到的是
+      「没有相关记录」—— 一句自信的假话
+
+    真实 Milvus 上已经踩过一次：`get_collection_stats` 的 `row_count`
+    只统计已 flush 的段，刚写入 5 条时它报 0，而 `query` 能查到 5 条。
+    """
+
+    def test_extract_count_from_dict(self):
+        from app.store.milvus import _extract_count
+
+        assert _extract_count([{"count(*)": 5}]) == 5
+
+    def test_extract_count_from_plain_dict(self):
+        from app.store.milvus import _extract_count
+
+        assert _extract_count({"count(*)": 7}) == 7
+
+    def test_extract_count_from_wrapped_string(self):
+        """某些版本的 `query` 把结果包成带 `data:` 前缀的字符串。"""
+        from app.store.milvus import _extract_count
+
+        assert _extract_count("data: [{'count(*)': 42}], extra_info: {}") == 42
+
+    def test_extract_count_empty_is_zero(self):
+        from app.store.milvus import _extract_count
+
+        assert _extract_count([]) == 0
+        assert _extract_count(None) == 0
+
+    def test_extract_count_unparseable_is_zero_not_crash(self):
+        from app.store.milvus import _extract_count
+
+        assert _extract_count("完全看不懂的形状") == 0
+        assert _extract_count([{"other": 1}]) == 0
+
+    def test_parse_hits_flat_list(self):
+        from app.store.milvus import _parse_hits
+
+        hits = _parse_hits([[{"id": "m1", "distance": 0.9}, {"id": "m2", "distance": 0.5}]])
+        assert [(h.memory_id, h.score) for h in hits] == [("m1", 0.9), ("m2", 0.5)]
+
+    def test_parse_hits_nested_entity(self):
+        """另一种形状：字段挂在 `entity` 下。"""
+        from app.store.milvus import _parse_hits
+
+        hits = _parse_hits(
+            [[{"id": "m1", "distance": 0.8, "entity": {"memory_id": "m1"}}]]
+        )
+        assert hits[0].memory_id == "m1"
+
+    def test_parse_hits_skips_malformed(self):
+        """畸形的命中项应被跳过，而不是让整次检索崩掉。"""
+        from app.store.milvus import _parse_hits
+
+        hits = _parse_hits([[{"id": "m1", "distance": 0.8}, {"distance": 0.5}, "垃圾"]])
+        assert [h.memory_id for h in hits] == ["m1"]
+
+    def test_parse_hits_empty(self):
+        from app.store.milvus import _parse_hits
+
+        assert _parse_hits([]) == []
+        assert _parse_hits(None) == []
+
+
+class TestMilvusTenantLiteral:
+    """**表达式注入防线** —— 这组断言是安全相关的，不是格式偏好。"""
+
+    def test_safe_identifier_is_quoted(self):
+        from app.store.milvus import _literal
+
+        assert _literal("cat-mom", field="user_id") == '"cat-mom"'
+
+    def test_uuid_and_common_chars_allowed(self):
+        from app.store.milvus import _literal
+
+        assert _literal("0189e64d-29aa-4ed0-9b89-302a3ae944e5", field="pet_id").startswith('"')
+        assert _literal("user_1.2:3", field="user_id") == '"user_1.2:3"'
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            'a" or user_id != "',
+            'a" or true or "',
+            "a\\",
+            "a\nb",
+            "a' or '1'='1",
+            "a b",
+            "",
+            "x" * 200,
+        ],
+    )
+    def test_expression_injection_rejected(self, evil: str):
+        """**恶意标识必须被拒绝，而不是被转义后放行。**
+
+        `user_id` 是攻击者可控的（开发登录允许自取名）。
+        不校验的话，一个叫 `" or user_id != "` 的用户
+        就能让过滤条件恒真 —— 读出所有人的记忆。
+        """
+        from app.store.milvus import _literal
+        from app.store.vectors import VectorIndexError
+
+        with pytest.raises(VectorIndexError):
+            _literal(evil, field="user_id")

@@ -99,6 +99,16 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      # ── 小内存机器上的调优 ──
+      #
+      # 默认配置在 1.8GB 的机器上会吃掉 500MB+，而其中很大一块是
+      # performance_schema（监控用，本项目不需要）。
+      # 不关掉它时，“MySQL 占一半内存”看起来像是数据量问题，
+      # 其实是默认值问题。
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size=128M
+      - --max-connections=50
+      - --table-open-cache=256
     ports:
       # ⚠️ 只绑回环，**不对外**。
       #
@@ -125,6 +135,9 @@ services:
   #
   # 用 standalone + 内置 etcd（ETCD_USE_EMBED）省掉两个额外容器 ——
   # 单机小规模下外置 etcd 没有收益，只是多两个要维护的东西。
+  #
+  # 也可以指向远程实例：把 MILVUS_URI 配成远端地址即可，
+  # 本地这个服务不放 --profile data 就不会启动。
   milvus:
     profiles: ["data"]
     image: milvusdb/milvus:v2.4.15
@@ -138,6 +151,10 @@ services:
     ports:
       - "127.0.0.1:19530:19530"
       - "127.0.0.1:9091:9091"
+    deploy:
+      resources:
+        limits:
+          memory: 700M
     volumes:
       - milvus-data:/var/lib/milvus
     healthcheck:

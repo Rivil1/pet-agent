@@ -263,16 +263,40 @@ class MilvusVectorIndex:
         return 0
 
     def count(self) -> int:
+        """索引中的条目总数。
+
+        ⚠️ **不能用 `get_collection_stats()` 的 `row_count`。**
+        它只统计**已 flush 的持久化段**，而 Milvus 写入先进 growing segment ——
+        实测：刚写入 5 条时 `row_count` 报 0，而 `query` 能查到全部 5 条。
+
+        这个值会出现在 `/healthz` 里。报 0 的后果不是“少一个数字”：
+        运维看到 `vector.count: 0` 会去跑一次回填（白做），
+        或者据此判断“索引没生效”而去查一个根本不存在的问题。
+
+        所以用 `count(*)` 聚合查询 —— 它跨全部段，值与实际可检索条数一致。
+        """
         client = self._ensure()
         try:
-            stats = client.get_collection_stats(self._collection, timeout=self._timeout_s)
-        except Exception as exc:  # noqa: BLE001
-            raise VectorIndexUnavailable(f"Milvus 统计失败：{exc}") from exc
-        # 不同版本键名不同：row_count / num_entities
-        for key in ("row_count", "num_entities"):
-            if isinstance(stats, dict) and key in stats:
-                return int(stats[key])
-        return 0
+            rows = client.query(
+                collection_name=self._collection,
+                filter="",
+                output_fields=["count(*)"],
+                timeout=self._timeout_s,
+            )
+            return _extract_count(rows)
+        except Exception:  # noqa: BLE001
+            # 退路：老版本可能不支持 count(*)。宁可给一个偏小的数字，
+            # 也不能让 /healthz 因为统计失败而整个不可用。
+            try:
+                stats = client.get_collection_stats(
+                    self._collection, timeout=self._timeout_s
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise VectorIndexUnavailable(f"Milvus 统计失败：{exc}") from exc
+            for key in ("row_count", "num_entities"):
+                if isinstance(stats, dict) and key in stats:
+                    return int(stats[key])
+            return 0
 
     def describe(self) -> dict[str, str]:
         base = {
@@ -291,6 +315,32 @@ class MilvusVectorIndex:
             base["connected"] = "false"
             base["reason"] = str(exc)[:200]
         return base
+
+
+def _extract_count(rows: Any) -> int:
+    """从 `count(*)` 聚合结果里取数字。
+
+    返回形状随版本而变（`[{"count(*)": 5}]` / 带 `data:` 包装的字符串 /
+    直接一个 dict），所以三种都兼容 —— 写死一种会让升级 pymilvus 后
+    计数**静默变 0**，而 0 恰好是「看起来正常但其实是错的」那类值。
+    """
+    if not rows:
+        return 0
+
+    # 有些版本把结果包成 "data: [{'count(*)': 5}], extra_info: {}" 这样的字符串
+    if isinstance(rows, str):
+        m = re.search(r"'(?:count\(\*\)|count)'\s*:\s*(\d+)", rows)
+        return int(m.group(1)) if m else 0
+
+    first = rows[0] if isinstance(rows, list) and rows else rows
+    if isinstance(first, dict):
+        for key in ("count(*)", "count", "COUNT(*)"):
+            if key in first:
+                try:
+                    return int(first[key])
+                except (TypeError, ValueError):
+                    return 0
+    return 0
 
 
 def _parse_hits(raw: Any) -> list[ScoredMemory]:

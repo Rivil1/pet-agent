@@ -109,7 +109,7 @@ KEY idx_mem_recall (user_id, pet_id, status)
 `app/store/ddl.sql`。7 张表，全部 `CREATE TABLE IF NOT EXISTS`。
 
 | 表 | 内容 | 特殊约束 |
-|---|---|---|
+| --- | --- | --- |
 | `pets` | 档案 + 身份锚点 | `must_keep_features` 与 `observed_but_unstable` **分列** |
 | `memories` | 记忆事件 | `UNIQUE (pet_id, dedup_key)`；`CHECK` 挡 `system_inference + active` |
 | `meow_records` | 主人标注的叫声 | 特征只存服务端 |
@@ -166,6 +166,7 @@ MILVUS_PORT=19530
 > 只有持有私钥的人能连进去。
 
 > **隧道脚本里的两个坑**（都已修）：
+>
 > 1. 不禁用 GSSAPI 时，ssh 会先试 `gssapi-with-mic`，
 >    在没有 Kerberos 凭据的机器上会挂很久 —— 表现为
 >    「ssh 进程活着、端口却没绑上」，日志里只有一句
@@ -189,7 +190,7 @@ CI 里配了就必须跑。
 ## 降级行为
 
 | 情况 | 行为 |
-|---|---|
+| --- | --- |
 | 未配 `MYSQL_HOST` | 走内存，`durable: false` |
 | 配了 mysql 但缺密码 | **启动失败**（不静默退回内存） |
 | MySQL 连不上 | **启动失败**（同上） |
@@ -226,6 +227,17 @@ CI 里配了就必须跑。
 docker compose -f docker-compose.prod.yml --profile data up -d
 docker compose -f docker-compose.prod.yml --profile data down
 
+# 只启 MySQL（Milvus 用远程实例时）
+docker compose -f docker-compose.prod.yml --profile data up -d mysql
+```
+
+> **小内存机器（1.8GB）的调优已在 compose 里**：
+> MySQL 关掉 `performance_schema`（它默认占 200MB+）、
+> `innodb_buffer_pool_size=128M`、`max_connections=50`；Milvus 限 700M。
+> 不调的话，「MySQL 占一半内存」看起来像数据量问题，实则是默认值问题 ——
+> 实测调优前 MySQL 占 508MB，而数据量是几十行。
+
+```bash
 # 连进 MySQL
 docker compose -f docker-compose.prod.yml exec mysql \
   mysql -upet_user -p pet_agent
@@ -258,11 +270,24 @@ b.close()
 ## 已知约束
 
 | 约束 | 影响 | 缓解 |
-|---|---|---|
+| --- | --- | --- |
 | 向量存 MySQL 占空间 | 1024 维 = 4KB/行 | 可接受；真要省可以只存索引 |
 | 无 migration 框架 | 改列需手工 ALTER | 见上 |
 | 连接池是手写的 | 无自动重试、无指标 | 有 ping 检测与重建；池大小可调 |
-| 单进程内存缓存 | 无 | 未引入 |
+| Milvus 计数要跨段查 | `get_collection_stats` 不可信 | 用 `count(*)`，见下 |
+
+### Milvus 的 `row_count` 会说谎
+
+`get_collection_stats()` 只统计**已 flush 的持久化段**，
+而写入先进 growing segment。实测：刚写入 5 条时它报 `0`，
+而 `query` 能查到全部 5 条。
+
+所以 `MilvusVectorIndex.count()` 用 `count(*)` 聚合查询。
+
+**为什么这个数字很重要**：它出现在 `/healthz` 里。
+报 0 的后果不是「少一个数字」—— 运维看到 `vector.count: 0`
+会去跑一次白做的回填，或者据此判断「索引没生效」
+而去查一个根本不存在的问题。
 
 ### 手写连接池的取舍
 
