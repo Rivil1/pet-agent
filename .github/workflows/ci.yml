@@ -221,6 +221,12 @@ jobs:
 
   # ===========================================================================
   # 部署
+  #
+  # ⚠️ 为什么不是「服务器 git pull」：
+  # 这台服务器在境内，**连不上 github.com**（实测 `git fetch` 返回
+  # `Empty reply from server`）。所以代码必须由 Actions 侧**推**过去，
+  # 而不是让服务器自己拉。镜像也同理 —— 在服务器本地构建，
+  # 走配好的国内镜像源（npm / pypi / debian / docker registry）。
   # ===========================================================================
   deploy:
     name: Deploy
@@ -232,31 +238,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy over SSH
+      - name: Package source
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='dist' \
+            --exclude='__pycache__' \
+            --exclude='.pytest_cache' \
+            --exclude='.ruff_cache' \
+            --exclude='*.log' \
+            --exclude='.env' \
+            -czf /tmp/pet-src.tar.gz .
+          ls -lh /tmp/pet-src.tar.gz
+
+      - name: Upload source to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.SERVER_HOST }}
+          username: ${{ vars.SERVER_USER || 'root' }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ vars.SERVER_PORT || 22 }}
+          source: /tmp/pet-src.tar.gz
+          target: /root
+          overwrite: true
+
+      - name: Build & restart on server
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ vars.SERVER_HOST }}
           username: ${{ vars.SERVER_USER || 'root' }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ vars.SERVER_PORT || 22 }}
+          command_timeout: 30m
           script_stop: true
           script: |
             set -e
             cd /opt/pet-agent
 
-            # 拉取最新代码（含 compose / nginx 配置变更）
-            git fetch --all --quiet
-            git reset --hard origin/main
+            # .env 只在服务器上，**不能被部署产物覆盖**（里面有真实密钥，
+            # 而它在 .gitignore 里 —— 拉代码的路径永远拿不到它）。
+            cp .env /root/pet-agent.env.backup
 
-            # 构建并滚动重启
+            # 清空（保留 .env），解包新代码
+            find . -mindepth 1 -maxdepth 1 ! -name '.env' -exec rm -rf {} +
+            tar -xzf /root/pet-src.tar.gz -C .
+            cp /root/pet-agent.env.backup .env
+            rm -f /root/pet-src.tar.gz
+
+            # 服务器本地构建（走 .env 里的国内镜像源）
             docker compose -f docker-compose.prod.yml build
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
-
-            # 清理悬空镜像
             docker image prune -f
 
-            # 等就绪
-            for i in $(seq 1 40); do
+            # 等就绪：探的是 **Nginx → 后端** 的完整路径，
+            # 而不是后端容器的直连端口 —— 后者通了前者也可能没通
+            for i in $(seq 1 45); do
               if curl -sf http://127.0.0.1/healthz >/dev/null; then
                 echo "✅ 部署成功"
                 exit 0

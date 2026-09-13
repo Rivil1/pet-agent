@@ -20,6 +20,10 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+      args:
+        # 国内服务器走镜像源；云端 CI 传官方源
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-dl-cdn.alpinelinux.org}
     image: pet-agent-web:latest
     container_name: pet-web
     restart: unless-stopped
@@ -42,6 +46,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-deb.debian.org}
     image: pet-agent-api:latest
     container_name: pet-agent
     restart: unless-stopped
@@ -71,6 +78,11 @@ services:
   # 用法：docker compose --profile data up -d
   #
   # MySQL：主库（宠物档案 / 记忆 / 会话 / 健康记录）
+  #
+  # ⚠️ 这里的密码用默认值而不是 `${VAR:?必填}`：
+  # compose 会对**未启用 profile 的服务也做变量插值**，
+  # 于是 `--profile data` 没开的时候，一个缺失的变量就能让整次 build 失败。
+  # 真正启用 data profile 前必须先把这些值改掉（见 .env.example）。
   mysql:
     profiles: ["data"]
     image: mysql:8.4
@@ -79,15 +91,15 @@ services:
     environment:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-pet_agent}
       MYSQL_USER: ${MYSQL_USER:-pet_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 必填}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-before-using-data-profile}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-before-using-data-profile}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-change-me-before-using-data-profile}"]
       interval: 10s
       timeout: 5s
       retries: 10

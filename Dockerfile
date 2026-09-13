@@ -5,6 +5,15 @@
 # 多阶段构建：构建阶段 + 运行阶段
 FROM python:3.11-slim AS builder
 
+# Debian 源可替换：deb.debian.org 在国内会被节流到几乎不可用，
+# 而云端 CI 用官方源最快。硬编码哪个都会在另一半环境里退回慢速或失败。
+ARG DEBIAN_MIRROR=deb.debian.org
+RUN set -eux; \
+    if [ "$DEBIAN_MIRROR" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|$DEBIAN_MIRROR|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+      sed -i "s|deb.debian.org|$DEBIAN_MIRROR|g" /etc/apt/sources.list; \
+    fi
+
 WORKDIR /build
 
 # 安装编译依赖
@@ -18,10 +27,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 复制依赖文件并安装
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+
+# 源可替换（同 web/Dockerfile）：云端 CI 与国内服务器需要不同的索引
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --no-cache-dir --user --index-url "$PIP_INDEX_URL" -r requirements.txt
 
 # 运行阶段
 FROM python:3.11-slim
+
+# 运行阶段同样需要换源（详见构建阶段的说明）
+ARG DEBIAN_MIRROR=deb.debian.org
+RUN set -eux; \
+    if [ "$DEBIAN_MIRROR" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|$DEBIAN_MIRROR|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+      sed -i "s|deb.debian.org|$DEBIAN_MIRROR|g" /etc/apt/sources.list; \
+    fi
 
 WORKDIR /app
 

@@ -160,7 +160,7 @@ bash scripts/run_smoke.sh
 
 ```text
 pet-agent/
-├── docs/                   设计文档（本阶段主交付物）
+├── docs/                   设计文档 + DEPLOY.md 部署指南
 ├── app/
 │   ├── schemas/            领域契约（Pydantic）—— 前后端与各节点共享的接口定义
 │   ├── graph/              LangGraph 编排
@@ -171,14 +171,72 @@ pet-agent/
 │   ├── llm/                模型客户端封装
 │   ├── store/              存储抽象（关系库 + 向量库）
 │   ├── api/                FastAPI 路由
+│   ├── bootstrap.py        环境变量 → 可启动 app 的装配层
 │   └── eval/               评测集与跑批
-├── web/                    简易 Web UI
+├── web/                    前端（React + Vite + TS + Tailwind）
+│   ├── src/pages/          5 个页面：宠物 / 对话 / 档案 / 一天 / 健康
+│   ├── src/components/     证据卡、标注抽屉、轨迹条、外壳
+│   ├── nginx.conf          静态服务 + API 反代
+│   └── scripts/            冒烟与 E2E（jsdom，无需浏览器）
+├── scripts/deploy.sh       本地 → 服务器一键部署
 └── data/
     ├── priors/             公开数据集先验（CatMeows 上下文分布）
     └── fixtures/           评测与开发用样例
 ```
 
-## 5. 当前进度
+## 5. 前端
+
+移动端优先的单页应用。设计方向是**田野笔记**，而不是通用宠物 App 的可爱风 ——
+因为项目的核心主张是「知识对象是主人的经验」，而田野笔记正是「每条观察都带出处」
+的东西。所以视觉语言直接编码了后端的证据分层：
+
+| 层 | 含义 | 形态 |
+|---|---|---|
+| `measured` | 代码从音频算出的数字，可重算 | 实线边框 |
+| `observed` | 模型对画面的**描述**，未经校验 | 虚线边框 |
+| `inferred` | 统计推断 | 点线边框 |
+| 主人标注 | 用户自己填的 | 手写下划线 |
+
+不看图例也能感到区别 —— 这是刻意的：用户正是靠这个分层判断「该信多少」。
+
+### 开发
+
+```bash
+cd web && npm install
+npm run dev          # 5173，自动把 /v1 代理到 127.0.0.1:8000
+```
+
+需要后端在 8000 跑着，并临时开开发登录：
+
+```bash
+PET_AGENT_ALLOW_DEV_LOGIN=1 \
+  python -m uvicorn app.bootstrap:create_app_from_env --factory --port 8000
+```
+
+### 验证
+
+```bash
+npm run typecheck    # tsc
+npm run build
+npm run smoke        # jsdom 挂载：证明能起来
+npm run e2e          # 22 项断言：登录 / 五页 / 切换宠物 / 真实对话
+```
+
+> 这两个脚本用 jsdom 而不是 Playwright —— 无浏览器可用时它们仍然能跑，
+> 而且能进入 CI。它们抓出过一个真缺陷：健康分级映射用了自造名
+> （`monitor`/`urgent`），后端实为 `L1`/`L2`/`L3`，
+> 于是五个分支全部落空、页面永远显示「没有拿到评估结果」，
+> 而 `tsc` 与 `build` 都是绿的。
+
+### 部署
+
+见 [docs/DEPLOY.md](docs/DEPLOY.md)。一句话版：
+
+```bash
+SERVER=47.102.186.248 SSH_KEY=~/aaa.pem scripts/deploy.sh
+```
+
+## 6. 当前进度
 
 - [x] 需求对齐（产品边界、技术栈、范围）
 - [x] 关键事实核实（CatMeows 数据集、DashScope 接口约束、兽医红旗来源、诊疗合规）
@@ -211,8 +269,14 @@ pet-agent/
   - 落库实体均带 `session_id`：`SessionMessage` / `PendingInterpretation` / `MeowRecord` / `HealthRecord` / `MemoryEvent`；list 端点支持 `?session_id=` 过滤
 - [x] **LangSmith 观测**：`app/observability/langsmith.py`，**`trace_id` 即 run id**（UUID 直用 / 非 UUID 用 `uuid5` 确定性派生），并写入 `metadata` 可在 LangSmith 按它检索
   - fail-soft：观测失败不影响对话；启用状态与错误暴露在 `/healthz`；**测试环境强制关闭**（`conftest.py`）
-- [x] 契约不变量测试（**631 项**全通过，无需大模型与网络）
+- [x] 契约不变量测试（**640 项**全通过，无需大模型与网络）
 - [x] **静态类型检查：生产代码 0 error**（`pyrightconfig.json`）
+- [x] **前端（React + Vite + TS + Tailwind，移动端优先）**：5 个页面 + 证据分层视觉语言
+  - 叫声解释与主人标注闭环内嵌在对话流 —— 标注只在刚看完解释时才有意义
+  - 三处刻意的诚实性 UI：模型模式常驻顶栏 / 测不出的特征显式划掉 / 健康第三态「无法评估」
+  - jsdom 冒烟 + 22 项 E2E 断言（真后端 + 真构建产物，无需浏览器）
+- [x] **后端补口**：`GET /v1/pets`（归属只从 token 派生）、`POST /v1/auth/dev-login`（**默认关闭**）+ 9 条回归测试
+- [x] **部署链路**：Docker 多阶段构建 + Nginx 同源反代 + `scripts/deploy.sh` 一键发布 + GitHub Actions CI/CD
 - [ ] P1：记录/时间线、对话分轨、SRR 呼吸频率
 - [ ] 同步债仍待处理（唯一视图：docs/15-doc-audit.md §7；但 `DESIGN.md` 已先行消除）
 - [x] 文档一致性自动检查（`scripts/doc_check.sh`，7 类检查）

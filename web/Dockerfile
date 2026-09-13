@@ -10,6 +10,17 @@
 # ---------- 构建阶段 ----------
 FROM node:22-alpine AS builder
 
+# npm 源可替换：云端 CI 用官方源，国内服务器用镜像 ——
+# 写死任何一个都会在另一半环境里变成奇慢或直接失败。
+ARG NPM_REGISTRY=https://registry.npmjs.org
+# Alpine 的 apk 源同理
+ARG ALPINE_MIRROR=dl-cdn.alpinelinux.org
+RUN set -eux; \
+    if [ "$ALPINE_MIRROR" != "dl-cdn.alpinelinux.org" ]; then \
+      sed -i "s|dl-cdn.alpinelinux.org|$ALPINE_MIRROR|g" /etc/apk/repositories; \
+    fi; \
+    npm config set registry "$NPM_REGISTRY" --global
+
 WORKDIR /build
 
 # 先只拷依赖清单：源码变动时这一层仍能命中缓存
