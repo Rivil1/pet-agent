@@ -202,6 +202,16 @@ def _log_densities(
         per_feature: dict[str, float] = {}
         for feat, value in values.items():
             pop = prior.stat(ctx, feat)
+            if pop is None:
+                # **该特征在这个情境下没有群体数据 → 跳过。**
+                #
+                # 这与「这个样本测不出该特征」是同一类事实：
+                # 两者都不能用来算似然。真实数据下这很常见 ——
+                # CatMeows 的 `call_rate` / `ici_mean` 可测率只有 0–4%。
+                #
+                # 不跳过的话只剩两条路：报错（一份部分覆盖的先验不可用），
+                # 或者填一个默认值（静默编造，后验看上去完全正常）。
+                continue
             stat = (
                 individual.shrunk_stat(ctx, feat, pop)
                 if individual is not None
@@ -237,16 +247,52 @@ def interpret(
     individual: IndividualModel | None = None,
     scene: str | None = None,
     similar_samples: list[SimilarSample] | None = None,
+    allow_unvalidated_prior: bool = False,
 ) -> BehaviorInterpretation:
     """推断裂叫声最可能产生于哪种情境。
 
     Args:
         features: 声学特征（由 ``app.audio.features.extract_features`` 产出）。
-        prior: 群体先验表。
+        prior: 群体先验表。**必须已验证**（见下）。
         individual: 该猫的个体模型。为 ``None`` 或 ``sample_count=0`` 时退回纯群体先验。
         scene: 用户补充的场景描述。
         similar_samples: 检索到的历史叫声。**只有已确认情境的样本参与计算。**
+        allow_unvalidated_prior: 跳过「先验已验证」的检查。
+            **只给消融实验与数学层测试用**，生产路径不得传。
+
+    Raises:
+        ValueError: 先验未通过验证（占位 / 未做留出评估 / 实测不如基线）。
+
+    ## 为什么把门禁放在这里，而不是只放在路由层
+
+    路由层（`choose_mode`）已经会因此降级。但**本函数是数学层**，
+    而“先验能不能用来产出后验概率”是一个**不变量**，不是路由的偏好：
+
+    - 任何绕过路由直接调本函数的路径（新调用方、脚本、将来的重构）
+      都会拿到一堆看起来很正常、实际上不具区分度的后验概率；
+    - CatMeows 实测结果正是这个情形：留出 macro-F1 0.364
+      低于多数类基线 0.506 —— 那些概率**不是证据**。
+
+    把检查放进本函数，不变量就是**结构性的**：不依赖调用方是否记得先问路由。
+    这与「存储层强制要求 tenant_id」是同一个思路（见 `app/store/base.py`）。
     """
+    if not prior.is_validated and not allow_unvalidated_prior:
+        margin = prior.discrimination_margin
+        if prior.is_placeholder:
+            detail = "含占位数据（数字是编的）"
+        elif margin is None:
+            detail = "未做过留出评估，无法确认有区分度"
+        else:
+            detail = (
+                f"实测不具区分度：留出 macro-F1 {prior.holdout_macro_f1:.3f} "
+                f"≤ 多数类基线 {prior.holdout_majority_baseline:.3f}"
+            )
+        raise ValueError(
+            f"先验 {prior.version} {detail}，不得用来产出后验概率。\n"
+            f"请用 `interpret_meow`（它会选择合适的降级模式），"
+            f"或在消融/数学层测试里显式传 `allow_unvalidated_prior=True`。"
+        )
+
     contexts = prior.contexts_ordered
     if len(contexts) < 2:
         raise ValueError("先验表至少需要 2 个情境才能做比较")
@@ -439,6 +485,14 @@ def _measured_evidence(
 ) -> EvidenceItem:
     label, unit = _FEATURE_LABEL.get(feat, (feat, ""))
     pop = prior.stat(ctx, feat)
+    if pop is None:
+        # **内部不变量**：本函数只被 `contributions` 里出现过的特征调用，
+        # 而那些特征是 `_log_densities` 跳过了缺数据项之后剩下的。
+        # 所以走到这里说明上游的过滤被改坏了 —— 报错而不是静默降级。
+        raise AssertionError(
+            f"特征 {feat!r} 在情境 {ctx.value!r} 下无群体数据，"
+            f"但它出现在了 contributions 里 —— 上游过滤有 bug"
+        )
     stat = individual.shrunk_stat(ctx, feat, pop) if individual else pop
 
     direction = "高于" if value > stat.mean else "低于"

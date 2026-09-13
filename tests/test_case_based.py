@@ -94,12 +94,14 @@ def rec(
     )
 
 
-@pytest.fixture(scope="module")
-def placeholder_prior() -> PriorTable:
-    """真实的占位先验（`is_placeholder: true`）。**路由必须因它降级。**"""
-    table = PriorTable.load(PRIOR_PATH)
-    assert table.is_placeholder, "本文件假设先验仍为占位数据"
-    return table
+@pytest.fixture()
+def placeholder_prior(prior_factory) -> PriorTable:
+    """占位先验。**路由必须因它降级。**
+
+    用工厂造而**不是读生产文件** —— 初版断言生产文件 `is_placeholder`，
+    而那个文件后来被真实统计替换，测试就集体变红了。
+    """
+    return prior_factory(is_placeholder=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -435,15 +437,35 @@ class TestRouter:
         )
         assert decision.mode is EvidenceMode.MEASURED_ONLY
 
-    def test_real_prior_uses_bayesian_path(self, placeholder_prior):
-        """先验一旦标记为已实测，就切回贝叶斯路径（后验可用）。"""
-        import dataclasses
-
-        real = dataclasses.replace(
-            placeholder_prior, is_placeholder=False, provenance="catmeows"
-        )
+    def test_validated_prior_uses_bayesian_path(self, prior_factory):
+        """**已验证且优于基线**的先验才切回贝叶斯路径（后验可用）。"""
+        real = prior_factory(macro_f1=0.80, majority_baseline=0.50)
         decision = choose_mode(features=feats(), records=[], prior=real)
         assert decision.mode is EvidenceMode.ACOUSTIC_PLUS_HISTORY
+        assert "优于基线" in decision.reason
+
+    def test_unvalidated_prior_does_not_produce_posterior(self, prior_factory):
+        """**「已实测」不等于「可用」。**
+
+        没有留出评估 → 无法声称有区分度 → 不产出后验概率。
+        """
+        unvalidated = prior_factory(macro_f1=None, majority_baseline=None)
+        decision = choose_mode(features=feats(), records=[], prior=unvalidated)
+        assert decision.mode is not EvidenceMode.ACOUSTIC_PLUS_HISTORY
+        assert "未做过留出验证" in decision.reason
+
+    def test_non_discriminative_prior_does_not_produce_posterior(self, prior_factory):
+        """**这是 CatMeows 实测结果对应的分支。**
+
+        留出 macro-F1 0.364 ≤ 多数类基线 0.506 —— 比「总是猜多数类」还差。
+        用它算出的后验不是证据，是一个看起来很确定的噪声。
+        """
+        weak = prior_factory(macro_f1=0.364, majority_baseline=0.506)
+        decision = choose_mode(features=feats(), records=[], prior=weak)
+        assert decision.mode is not EvidenceMode.ACOUSTIC_PLUS_HISTORY
+        assert "不具区分度" in decision.reason
+        # 原因里要带上具体数字，否则运维不知道该信什么
+        assert "0.364" in decision.reason and "0.506" in decision.reason
 
     def test_no_prior_goes_cold_not_bayesian(self):
         decision = choose_mode(features=feats(), records=[])

@@ -448,7 +448,14 @@ class TestLayerSummary:
         assert Layer.A in summary
         assert Layer.B in summary, "B 层即使全不可测也要出现 —— 而不是被省略"
 
-    def test_unmeasurable_is_counted_not_dropped(self):
-        suite = run_suite(BASELINE, scenes=[SCENES_BY_ID["acoustic-blocked"]])
+    def test_b_layer_is_reported(self):
+        """B 层必须出现 —— 即使它现在能测了。
+
+        以前这条断言是「不可测项数 >= 1」（先验是占位值时）。
+        现在先验换成了真实统计，B 层**能产出数字了**，
+        但仍必须出现在分层汇总里 —— 它的可信度等级与 A 层不同。
+        """
+        suite = run_suite(BASELINE, scenes=[SCENES_BY_ID["acoustic-holdout"]])
         summary = layer_summary(suite)
-        assert summary[Layer.B]["不可测项数"] >= 1
+        assert Layer.B in summary
+        assert summary[Layer.B]["场景数"] == 1

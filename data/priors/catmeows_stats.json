@@ -1,88 +1,358 @@
 {
-  "version": "placeholder-v0",
-  "provenance": "placeholder",
-  "reviewed": false,
-  "is_placeholder": true,
-  "source": null,
-  "note": "⚠️ 本文件全部数值为占位值，不是实测统计。群体先验尚未构建（见 docs/DESIGN.md §7.3 U3）。标准差刻意取宽，用以表达「不确定」——窄标准差会产生过度自信的后验。替换为 CatMeows 实际统计量后，须同时更新 version 并把 provenance 改为 'catmeows'。",
-  "feature_specs": {
-    "duration": {"unit": "s", "desc": "单次叫声时长"},
-    "f0_mean": {"unit": "Hz", "desc": "基频均值，pyin 置信度 <0.15 的帧已剔除"},
-    "f0_range": {"unit": "Hz", "desc": "基频 P5–P95 跨度"},
-    "f0_slope": {"unit": "norm", "desc": "基频轮廓线性拟合斜率。方向性含义有文献支持：正向/亲和情境倾向上升"},
-    "call_rate": {"unit": "次/10s", "desc": "单位时间叫声次数，索求行为强度指标"},
-    "ici_mean": {"unit": "s", "desc": "相邻叫声间隔均值"},
-    "rms_mean": {"unit": "norm", "desc": "能量包络均值"},
-    "roughness": {"unit": "norm", "desc": "粗糙度，幅度调制深度"}
+ "version": "catmeows-a7140527",
+ "provenance": "catmeows",
+ "reviewed": false,
+ "is_placeholder": false,
+ "source": {
+  "dataset": "CatMeows",
+  "url": "https://zenodo.org/records/4008297",
+  "doi": "10.5281/zenodo.4008297",
+  "license": "CC-BY-4.0",
+  "citation": "Ludovico, R., et al. (2020). CatMeows: A Publicly-Available Dataset of Cat Vocalizations. Zenodo.",
+  "mirror_used": "https://huggingface.co/datasets/zeddez/CatMeows"
+ },
+ "note": "由 scripts/build_priors.py 从 CatMeows 原始音频构建，特征用本项目的 extract_features 提取（不是论文报的统计量 —— 不同提取器的口径不可互换）。训练猫 17 只、留出 4 只（seed=20260913）。备注：数据集只覆盖 3 类情境，其余 ContextLabel 无数据；可测样本少于 20 的特征被显式标记为 insufficient 而不是给均值。",
+ "feature_specs": {
+  "duration": {
+   "unit": "s",
+   "desc": "单次叫声时长"
   },
-  "base_rates": {
-    "greeting": 0.30,
-    "food_waiting": 0.25,
-    "door_attention": 0.15,
-    "affection_brushing": 0.12,
-    "other": 0.10,
-    "isolation_distress": 0.08
+  "f0_mean": {
+   "unit": "Hz",
+   "desc": "基频均值，pyin 置信度 <0.15 的帧已剔除"
   },
-  "contexts": {
-    "food_waiting": {
-      "duration": [0.45, 0.25],
-      "f0_mean": [550.0, 120.0],
-      "f0_range": [150.0, 80.0],
-      "f0_slope": [0.10, 0.35],
-      "call_rate": [4.0, 1.5],
-      "ici_mean": [0.60, 0.25],
-      "rms_mean": [0.15, 0.07],
-      "roughness": [0.20, 0.10]
-    },
-    "door_attention": {
-      "duration": [0.60, 0.30],
-      "f0_mean": [520.0, 130.0],
-      "f0_range": [180.0, 90.0],
-      "f0_slope": [0.05, 0.40],
-      "call_rate": [3.0, 1.5],
-      "ici_mean": [0.80, 0.35],
-      "rms_mean": [0.13, 0.06],
-      "roughness": [0.22, 0.11]
-    },
-    "affection_brushing": {
-      "duration": [0.40, 0.20],
-      "f0_mean": [450.0, 100.0],
-      "f0_range": [120.0, 70.0],
-      "f0_slope": [0.30, 0.30],
-      "call_rate": [2.0, 1.2],
-      "ici_mean": [1.20, 0.50],
-      "rms_mean": [0.10, 0.05],
-      "roughness": [0.15, 0.08]
-    },
-    "isolation_distress": {
-      "duration": [0.90, 0.45],
-      "f0_mean": [700.0, 150.0],
-      "f0_range": [250.0, 110.0],
-      "f0_slope": [-0.25, 0.40],
-      "call_rate": [5.5, 2.0],
-      "ici_mean": [0.45, 0.20],
-      "rms_mean": [0.20, 0.08],
-      "roughness": [0.30, 0.12]
-    },
-    "greeting": {
-      "duration": [0.35, 0.18],
-      "f0_mean": [500.0, 110.0],
-      "f0_range": [140.0, 75.0],
-      "f0_slope": [0.35, 0.30],
-      "call_rate": [1.5, 1.0],
-      "ici_mean": [1.50, 0.60],
-      "rms_mean": [0.11, 0.05],
-      "roughness": [0.14, 0.07]
-    },
-    "other": {
-      "duration": [0.55, 0.30],
-      "f0_mean": [540.0, 140.0],
-      "f0_range": [170.0, 95.0],
-      "f0_slope": [0.00, 0.45],
-      "call_rate": [3.0, 2.0],
-      "ici_mean": [0.85, 0.45],
-      "rms_mean": [0.14, 0.07],
-      "roughness": [0.20, 0.12]
-    }
+  "f0_range": {
+   "unit": "Hz",
+   "desc": "基频 P5–P95 跨度"
+  },
+  "f0_slope": {
+   "unit": "norm",
+   "desc": "基频轮廓线性拟合斜率。方向性含义有文献支持：正向/亲和情境倾向上升"
+  },
+  "call_rate": {
+   "unit": "次/10s",
+   "desc": "单位时间叫声次数，索求行为强度指标"
+  },
+  "ici_mean": {
+   "unit": "s",
+   "desc": "相邻叫声间隔均值"
+  },
+  "rms_mean": {
+   "unit": "norm",
+   "desc": "能量包络均值"
+  },
+  "roughness": {
+   "unit": "norm",
+   "desc": "粗糙度，幅度调制深度"
   }
+ },
+ "base_rates": {
+  "affection_brushing": 0.299435,
+  "food_waiting": 0.194915,
+  "isolation_distress": 0.50565
+ },
+ "contexts": {
+  "affection_brushing": {
+   "duration": [
+    0.617861,
+    0.400342
+   ],
+   "f0_mean": [
+    633.364767,
+    165.683766
+   ],
+   "f0_range": [
+    135.766279,
+    127.900699
+   ],
+   "f0_slope": [
+    -0.05513,
+    0.233222
+   ],
+   "rms_mean": [
+    0.0162,
+    0.018399
+   ],
+   "roughness": [
+    0.183508,
+    0.097176
+   ]
+  },
+  "food_waiting": {
+   "duration": [
+    0.515787,
+    0.28953
+   ],
+   "f0_mean": [
+    673.543387,
+    184.492484
+   ],
+   "f0_range": [
+    102.535161,
+    93.320231
+   ],
+   "f0_slope": [
+    -0.029537,
+    0.239562
+   ],
+   "rms_mean": [
+    0.009764,
+    0.009669
+   ],
+   "roughness": [
+    0.197406,
+    0.11731
+   ]
+  },
+  "isolation_distress": {
+   "duration": [
+    0.741899,
+    0.251506
+   ],
+   "f0_mean": [
+    601.505371,
+    135.90011
+   ],
+   "f0_range": [
+    121.2764,
+    93.017031
+   ],
+   "f0_slope": [
+    -0.127603,
+    0.195757
+   ],
+   "rms_mean": [
+    0.018632,
+    0.013722
+   ],
+   "roughness": [
+    0.151163,
+    0.052931
+   ]
+  }
+ },
+ "build": {
+  "seed": 20260913,
+  "min_samples": 20,
+  "train_cats": [
+   "ANI01",
+   "BAC01",
+   "BLE01",
+   "BRA01",
+   "CAN01",
+   "CLE01",
+   "IND01",
+   "JJX01",
+   "MAG01",
+   "MEG01",
+   "MIN01",
+   "NIG01",
+   "NUL01",
+   "REG01",
+   "SPI01",
+   "TIG01",
+   "WHO01"
+  ],
+  "holdout_cats": [
+   "BRI01",
+   "DAK01",
+   "LEO01",
+   "MAT01"
+  ],
+  "per_context": {
+   "affection_brushing": {
+    "n_clips": 106,
+    "n_cats": 14,
+    "features": {
+     "duration": {
+      "status": "ok",
+      "n": 106,
+      "coverage": 1.0
+     },
+     "f0_mean": {
+      "status": "ok",
+      "n": 86,
+      "coverage": 0.811
+     },
+     "f0_range": {
+      "status": "ok",
+      "n": 86,
+      "coverage": 0.811
+     },
+     "f0_slope": {
+      "status": "ok",
+      "n": 86,
+      "coverage": 0.811
+     },
+     "call_rate": {
+      "status": "insufficient",
+      "n": 3,
+      "reason": "可测样本 3 < 门槛 20"
+     },
+     "ici_mean": {
+      "status": "insufficient",
+      "n": 1,
+      "reason": "可测样本 1 < 门槛 20"
+     },
+     "rms_mean": {
+      "status": "ok",
+      "n": 106,
+      "coverage": 1.0
+     },
+     "roughness": {
+      "status": "ok",
+      "n": 106,
+      "coverage": 1.0
+     }
+    }
+   },
+   "food_waiting": {
+    "n_clips": 69,
+    "n_cats": 11,
+    "features": {
+     "duration": {
+      "status": "ok",
+      "n": 69,
+      "coverage": 1.0
+     },
+     "f0_mean": {
+      "status": "ok",
+      "n": 62,
+      "coverage": 0.899
+     },
+     "f0_range": {
+      "status": "ok",
+      "n": 62,
+      "coverage": 0.899
+     },
+     "f0_slope": {
+      "status": "ok",
+      "n": 62,
+      "coverage": 0.899
+     },
+     "call_rate": {
+      "status": "insufficient",
+      "n": 0,
+      "reason": "可测样本 0 < 门槛 20"
+     },
+     "ici_mean": {
+      "status": "insufficient",
+      "n": 0,
+      "reason": "可测样本 0 < 门槛 20"
+     },
+     "rms_mean": {
+      "status": "ok",
+      "n": 69,
+      "coverage": 1.0
+     },
+     "roughness": {
+      "status": "ok",
+      "n": 69,
+      "coverage": 1.0
+     }
+    }
+   },
+   "isolation_distress": {
+    "n_clips": 179,
+    "n_cats": 15,
+    "features": {
+     "duration": {
+      "status": "ok",
+      "n": 179,
+      "coverage": 1.0
+     },
+     "f0_mean": {
+      "status": "ok",
+      "n": 175,
+      "coverage": 0.978
+     },
+     "f0_range": {
+      "status": "ok",
+      "n": 175,
+      "coverage": 0.978
+     },
+     "f0_slope": {
+      "status": "ok",
+      "n": 175,
+      "coverage": 0.978
+     },
+     "call_rate": {
+      "status": "insufficient",
+      "n": 0,
+      "reason": "可测样本 0 < 门槛 20"
+     },
+     "ici_mean": {
+      "status": "insufficient",
+      "n": 0,
+      "reason": "可测样本 0 < 门槛 20"
+     },
+     "rms_mean": {
+      "status": "ok",
+      "n": 179,
+      "coverage": 1.0
+     },
+     "roughness": {
+      "status": "ok",
+      "n": 179,
+      "coverage": 1.0
+     }
+    }
+   }
+  },
+  "extraction": {
+   "extractor": "app.audio.features.extract_features",
+   "target_sr": 16000,
+   "total_files": 440,
+   "parsed": 440,
+   "ok": 440,
+   "unreadable": 0,
+   "too_short": 0,
+   "unparsable": 0
+  }
+ },
+ "holdout_eval": {
+  "n_samples": 86,
+  "n_scored": 86,
+  "n_skipped_no_features": 0,
+  "accuracy": 0.407,
+  "macro_f1": 0.3638,
+  "majority_class_baseline": 0.5057,
+  "per_class": {
+   "affection_brushing": {
+    "precision": 0.28,
+    "recall": 0.3333,
+    "f1": 0.3043,
+    "support": 21
+   },
+   "food_waiting": {
+    "precision": 0.3571,
+    "recall": 0.2174,
+    "f1": 0.2703,
+    "support": 23
+   },
+   "isolation_distress": {
+    "precision": 0.4894,
+    "recall": 0.5476,
+    "f1": 0.5169,
+    "support": 42
+   }
+  },
+  "confusion": {
+   "affection_brushing->affection_brushing": 7,
+   "affection_brushing->food_waiting": 6,
+   "affection_brushing->isolation_distress": 8,
+   "food_waiting->affection_brushing": 2,
+   "food_waiting->food_waiting": 5,
+   "food_waiting->isolation_distress": 16,
+   "isolation_distress->affection_brushing": 16,
+   "isolation_distress->food_waiting": 3,
+   "isolation_distress->isolation_distress": 23
+  },
+  "holdout_cats": [
+   "BRI01",
+   "DAK01",
+   "LEO01",
+   "MAT01"
+  ]
+ }
 }

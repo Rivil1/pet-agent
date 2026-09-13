@@ -69,6 +69,28 @@ ablation:  ## 跑基线与全部消融组，输出对比
 eval-strict:  ## 跑评测并在有断言失败时以非零码退出（CI 用）
 	$(PYTHON) -m app.eval --strict --out $(OUT)
 
+# ── 数据集与先验 ─────────────────────────────────────────────
+#
+# 群体先验由 CatMeows 原始音频算出（不能拿论文报的统计量 —— 提取器不同，
+# 口径不可互换）。先验 JSON 已进版本库，所以日常开发不需要跑下面这些；
+# 只在**换数据集 / 改提取器**时才重建。
+#
+# 下载（CatMeows 原始音频 440 条 / 21 只猫，CC-BY-4.0）：
+#   curl -L -o catmeows.zip \
+#     https://huggingface.co/datasets/zeddez/CatMeows/resolve/main/dataset.zip
+#   python -c "import zipfile; zipfile.ZipFile('catmeows.zip').extractall('catmeows')"
+
+CATMEOWS_DIR ?= /tmp/catmeows/wav
+
+priors-explore:  ## 探查 CatMeows：可测率 / 情境分布（不写文件）
+	PYTHONPATH=. $(PYTHON) scripts/build_priors.py $(CATMEOWS_DIR) --explore
+
+priors:  ## 从 CatMeows 重建群体先验（含留出评估）
+	PYTHONPATH=. $(PYTHON) scripts/build_priors.py $(CATMEOWS_DIR) \
+	  --out data/priors/catmeows_stats.json \
+	  --template data/priors/catmeows_stats.json \
+	  --holdout 4 --min-samples 20
+
 report: eval  ## eval 的别名
 	@echo ""
 	@echo "报告：$(OUT)/eval.md"

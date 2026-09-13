@@ -63,9 +63,16 @@ def logit_of(result, ctx: ContextLabel) -> float:
     return value
 
 
-@pytest.fixture(scope="module")
-def prior() -> PriorTable:
-    return PriorTable.load(PRIOR_PATH)
+@pytest.fixture()
+def prior(prior_factory) -> PriorTable:
+    """**测试自己的先验，不读生产数据文件。**
+
+    初版读 `data/priors/catmeows_stats.json`。那个文件后来被真实统计
+    替换掉之后，十几个测试一起变红 —— 而它们测的代码一行没改。
+    那种耦合会让「数据更新」和「代码回归」在结果里长得一样，
+    而两者的处理方式完全不同。
+    """
+    return prior_factory()
 
 
 @pytest.fixture(scope="module")
@@ -91,11 +98,48 @@ class TestPriorTable:
         assert len(prior.sha256) == 64
         assert all(c in "0123456789abcdef" for c in prior.sha256)
 
-    def test_placeholder_is_flagged(self, prior: PriorTable):
-        """U3：群体先验尚未构建。**必须被标记，不得静默当成真实统计。**"""
-        assert prior.is_placeholder is True
-        assert prior.provenance == "placeholder"
-        assert prior.note
+    def test_placeholder_is_flagged(self, prior_factory):
+        """占位先验**必须被标记**，不得静默当成真实统计。
+
+        ⚠️ 用工厂造一个占位先验，而不是读生产文件 ——
+        初版断言生产文件是占位的，而那个文件后来被真实统计替换掉了，
+        测试就红了，而它测的代码一行没改。
+        """
+        placeholder = prior_factory(is_placeholder=True)
+        assert placeholder.is_placeholder is True
+        assert placeholder.provenance == "placeholder"
+        assert placeholder.is_validated is False, "占位数据不可能通过验证"
+
+    def test_unvalidated_real_prior_is_not_usable_for_posterior(self, prior_factory):
+        """**真实的数字≠可用的数字。**
+
+        这是 CatMeows 实测结果所对应的关键区分：
+        换成真实统计后 `is_placeholder=False`，
+        但留出 macro-F1（0.364）低于多数类基线（0.506）——
+        它在没见过的猫上比「总是猜多数类」还差。
+
+        所以「是不是编的」与「能不能用」必须是两个判据。
+        """
+        real_but_useless = prior_factory(
+            is_placeholder=False, macro_f1=0.364, majority_baseline=0.506
+        )
+        assert real_but_useless.is_placeholder is False
+        assert real_but_useless.is_validated is False
+        assert real_but_useless.discrimination_margin < 0
+
+    def test_production_prior_file_loads(self):
+        """生产先验文件（不论内容）必须能加载。
+
+        上面几个测试测的是「各种先验的行为」；
+        这一条只测「当前那份文件格式合法」——
+        两者分开，文件内容更新就不会连带打断行为测试。
+        """
+        table = PriorTable.load(PRIOR_PATH)
+        assert table.version
+        assert table.contexts, "先验至少要有一个情境"
+        assert abs(sum(table.base_rates.values()) - 1.0) < 1e-3
+        # 不论真假，都必须能就「能不能产出后验概率」给出明确结论
+        assert isinstance(table.is_validated, bool)
 
     def test_all_features_present_per_context(self, prior: PriorTable):
         for ctx in prior.contexts_ordered:
@@ -122,20 +166,67 @@ class TestPriorTable:
         with pytest.raises(ValueError, match="std 必须为正"):
             PriorTable.load(p)
 
-    def test_rejects_missing_feature(self, tmp_path):
+    def test_partial_feature_coverage_is_allowed(self, tmp_path):
+        """**缺特征不再算格式错误** —— 它是「没有数据」，是合法状态。
+
+        ## 为什么这条断言被反过来了
+
+        初版是 `test_rejects_missing_feature`：缺一个特征就报错。
+        那时先验是占位值、8 个特征都写了，所以这条约束从未被真实数据碰过。
+
+        换成 CatMeows 真实统计后：`call_rate` / `ici_mean` 的可测率
+        只有 **0–4%**（每条录音都是单次叫声，没有「间隔」可言）。
+        它们**没有数据**，不是「忘了写」。
+
+        把「没有数据」当格式错误会逼着人填一个假数字才能加载 ——
+        而那正是这个项目一直在防的事。
+
+        所以：缺特征 → 允许，推理时跳过（与 `AcousticFeatures.unavailable` 同类）；
+        **写错特征名** → 仍然报错（那会让一个特征静默地永不生效）。
+        """
+        import json
+
+        partial = {
+            "version": "t",
+            "base_rates": {"greeting": 0.5, "other": 0.5},
+            "contexts": {
+                # greeting 只有 3 个特征；other 齐全
+                "greeting": {
+                    "duration": [1.0, 0.5],
+                    "f0_mean": [500.0, 100.0],
+                    "rms_mean": [0.1, 0.05],
+                },
+                "other": {f: [1.0, 1.0] for f in FEATURE_ORDER},
+            },
+        }
+        p = tmp_path / "partial.json"
+        p.write_text(json.dumps(partial), encoding="utf-8")
+
+        table = PriorTable.load(p)
+        # 有数据的特征照常可取
+        assert table.stat(ContextLabel.GREETING, "duration") is not None
+        # 没数据的返回 None —— 而不是抛错、也不是编一个值
+        assert table.stat(ContextLabel.GREETING, "call_rate") is None
+        assert "call_rate" in table.missing_features(ContextLabel.GREETING)
+        # 齐全的情境不受影响
+        assert table.missing_features(ContextLabel.OTHER) == ()
+
+    def test_rejects_unknown_feature_name(self, tmp_path):
+        """**写错特征名仍然要报错。**
+
+        它与「没有数据」是两回事：`f0_men` 这种拼错会让那个特征
+        静默地永不生效，而后验看上去完全正常。
+        """
         import json
 
         bad = {
             "version": "t",
-            "base_rates": {"greeting": 0.5, "other": 0.5},
-            "contexts": {
-                "greeting": {"duration": [1.0, 1.0]},
-                "other": {f: [1.0, 1.0] for f in FEATURE_ORDER},
-            },
+            "base_rates": {"greeting": 1.0},
+            "contexts": {"greeting": {"f0_men": [1.0, 1.0]}},
         }
-        p = tmp_path / "bad2.json"
+        p = tmp_path / "unknown.json"
         p.write_text(json.dumps(bad), encoding="utf-8")
-        with pytest.raises(ValueError, match="缺少特征"):
+        with pytest.raises(ValueError, match="未知特征"):
             PriorTable.load(p)
 
 
@@ -488,11 +579,55 @@ class TestQualityDegradation:
         r = interpret(features=meow, prior=prior)
         assert "校准" in r.limitations
 
-    def test_placeholder_prior_surfaced_in_limitations(self, prior, meow):
-        """占位先验必须出现在输出限制中，不得静默使用。"""
-        assert prior.is_placeholder
-        r = interpret(features=meow, prior=prior)
-        assert "占位" in r.limitations
+    def test_placeholder_prior_degrades_via_router(self, prior_factory, meow):
+        """占位先验**必须走降级路径**，不得静默使用。
+
+        ⚠️ 要调 `interpret_meow`（路由层）而不是 `interpret`（数学层）——
+        降级是路由的职责。数学层现在会**直接报错**（不让不具区分度的先验
+        产出后验），所以用它测降级是测错了函数。
+        """
+        from app.interpreter import interpret_meow
+
+        placeholder = prior_factory(is_placeholder=True)
+        r, decision = interpret_meow(features=meow, prior=placeholder)
+        assert r.evidence_mode.value != "acoustic_plus_history"
+        assert "占位" in decision.reason
+
+    def test_non_discriminative_prior_degrades_via_router(self, prior_factory, meow):
+        """**实测但不具区分度**的先验也要降级。
+
+        这是 CatMeows 换成真实统计后的新情形：数字是真的，
+        但留出 macro-F1（0.364）低于多数类基线（0.506）——
+        它在没见过的猫上比「总是猜多数类」还差。
+        那种先验产生的后验概率不是证据，用户必须被告知。
+        """
+        from app.interpreter import interpret_meow
+
+        weak = prior_factory(macro_f1=0.364, majority_baseline=0.506)
+        r, decision = interpret_meow(features=meow, prior=weak)
+        assert r.evidence_mode.value != "acoustic_plus_history", (
+            "不具区分度的先验不得进入贝叶斯路径"
+        )
+        assert "不具区分度" in decision.reason
+        assert "0.364" in decision.reason and "0.506" in decision.reason
+
+    def test_bayes_layer_refuses_unvalidated_prior(self, prior_factory, meow):
+        """**数学层自己不接受未验证的先验。**
+
+        路由会降级，但「先验能不能产出后验概率」是**不变量**而不是路由的偏好：
+        任何绕过路由直接调 `interpret` 的路径（新调用方、脚本、重构）
+        都会拿到一堆看起来正常、实际不具区分度的概率。
+
+        把检查放进数学层，不变量就是结构性的 ——
+        与「存储层强制要求 tenant_id」同一个思路。
+        """
+        weak = prior_factory(macro_f1=0.30, majority_baseline=0.50)
+        with pytest.raises(ValueError, match="不得用来产出后验概率"):
+            interpret(features=meow, prior=weak)
+
+        # 消融 / 数学层测试可以显式跳过，但那是一个**要写出来的决定**
+        r = interpret(features=meow, prior=weak, allow_unvalidated_prior=True)
+        assert r.evidence_mode.value == "acoustic_plus_history"
 
     def test_missing_f0_is_flagged(self, prior, meow):
         no_f0 = meow.model_copy(update={"f0_mean": 0.0})
@@ -510,6 +645,10 @@ class TestRobustness:
             is_placeholder=False,
             sha256="0" * 64,
             note="",
+            # 显式给验证信息，否则先被「未验证」那条拦住 ——
+            # 而本测试要测的是「情境数不足」这个**更晚**的检查。
+            holdout_macro_f1=0.9,
+            holdout_majority_baseline=0.5,
             base_rates={ContextLabel.OTHER: 1.0},
             contexts={
                 ContextLabel.OTHER: {

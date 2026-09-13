@@ -434,18 +434,16 @@ class TestModelCannotMasqueradeAsMeasurement:
         )
         assert result.evidence[0].kind is EvidenceKind.OBSERVED
 
-    def test_observed_never_carries_log_odds(self):
+    def test_observed_never_carries_log_odds(self, prior_factory):
         """`OBSERVED` 不在概率模型里 —— 给它对数几率贡献值是编造。
 
         即使身处 `acoustic_plus_history` 模式，它也必须为 None。
         """
-        from app.interpreter import PriorTable
-        import dataclasses
-
-        prior = dataclasses.replace(
-            PriorTable.load("data/priors/catmeows_stats.json"),
-            is_placeholder=False,
-        )
+        # 用工厂造一个**已验证**的先验。
+        # 初版读生产文件再把 is_placeholder 改成 False —— 而门禁现在
+        # 还要求「实测优于基线」，那个文件不满足，于是这里会报错。
+        # 本测试要测的是 OBSERVED 证据的形状，不是先验门禁。
+        prior = prior_factory(macro_f1=0.80, majority_baseline=0.50)
         from app.interpreter import interpret
 
         # 正常测量证据带贡献值
@@ -469,15 +467,13 @@ class TestModelCannotMasqueradeAsMeasurement:
             )
             BehaviorInterpretation.model_validate(behavior_result.model_dump())
 
-    def test_observed_is_accepted_alongside_measured(self):
+    def test_observed_is_accepted_alongside_measured(self, prior_factory):
         """两者可以在同一条解释里共存 —— 只是各自承担不同的可验证性承诺。"""
-        from app.interpreter import PriorTable
-        import dataclasses
-
-        prior = dataclasses.replace(
-            PriorTable.load("data/priors/catmeows_stats.json"),
-            is_placeholder=False,
-        )
+        # 用工厂造一个**已验证**的先验。
+        # 初版读生产文件再把 is_placeholder 改成 False —— 而门禁现在
+        # 还要求「实测优于基线」，那个文件不满足，于是这里会报错。
+        # 本测试要测的是 OBSERVED 证据的形状，不是先验门禁。
+        prior = prior_factory(macro_f1=0.80, majority_baseline=0.50)
         from app.interpreter import interpret
 
         base = interpret(features=_features(), prior=prior)

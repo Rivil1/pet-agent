@@ -65,6 +65,60 @@ class ModeDecision:
     qualified_contexts: int = 0
 
 
+def _prior_verdict(prior: PriorTable | None) -> tuple[bool, str]:
+    """先验能不能用来产出后验概率。返回 `(可用, 原因)`。
+
+    ## ★ 三种「不可用」，而不是一种
+
+    初版只看 `is_placeholder`：只要不是占位值就算「已实测」，
+    于是直接进入 `ACOUSTIC_PLUS_HISTORY` 并输出后验概率。
+
+    换成 CatMeows 真实统计后，留出猫实测结果是：
+
+        留出 macro-F1  0.364
+        多数类基线     0.506
+
+    **它比「总是猜多数类」还差。** 六个可用特征的分离度全在 0.32–0.72，
+    分布大幅重叠。
+
+    这种情况下输出后验概率**不是证据**，是一个看起来很确定的噪声 ——
+    而用户无法分辨它和真实证据的区别。所以三种都要拦：
+
+    | 情形 | 结论 |
+    |---|---|
+    | 占位数据 | 不可用 —— 数字是编的 |
+    | 未做过留出评估 | 不可用 —— **无法确认**有区分度 |
+    | 实测不如基线 | 不可用 —— 已确认**没有**区分度 |
+
+    第三条最关键：它把「已实测」从「可用」里拆了出来。
+    """
+    if prior is None:
+        return False, "未提供群体先验"
+
+    if prior.is_placeholder:
+        return False, "群体先验为占位数据，不产生后验概率"
+
+    margin = prior.discrimination_margin
+    if margin is None:
+        return False, (
+            "群体先验未做过留出验证，无法确认有区分度 —— 不产生后验概率"
+        )
+
+    if margin <= 0.0:
+        return False, (
+            f"群体先验实测**不具区分度**：留出 macro-F1 "
+            f"{prior.holdout_macro_f1:.3f} ≤ 多数类基线 "
+            f"{prior.holdout_majority_baseline:.3f}"
+            f"（留出猫 {len(prior.holdout_cats)} 只）—— 不产生后验概率"
+        )
+
+    return True, (
+        f"群体先验 {prior.version} 已实测且优于基线"
+        f"（macro-F1 {prior.holdout_macro_f1:.3f} > 基线 "
+        f"{prior.holdout_majority_baseline:.3f}）"
+    )
+
+
 def choose_mode(
     *,
     features: AcousticFeatures,
@@ -72,17 +126,12 @@ def choose_mode(
     prior: PriorTable | None = None,
 ) -> ModeDecision:
     """决定用哪个模式。**纯函数，不产生副作用。**"""
-    if prior is not None and not prior.is_placeholder:
+    usable, prior_note = _prior_verdict(prior)
+    if usable:
         return ModeDecision(
             mode=EvidenceMode.ACOUSTIC_PLUS_HISTORY,
-            reason=f"群体先验 {prior.version} 已实测（provenance={prior.provenance}）",
+            reason=prior_note,
         )
-
-    prior_note = (
-        "群体先验为占位数据，不产生后验概率"
-        if prior is not None
-        else "未提供群体先验"
-    )
 
     matches = match_cases(features, records or [])
     counts = count_by_context(matches)

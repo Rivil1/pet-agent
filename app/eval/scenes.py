@@ -1177,24 +1177,30 @@ def _scene_latency(ctx: Any) -> SceneOutcome:
 # =============================================================================
 
 
-def _scene_acoustic_blocked(ctx: Any) -> SceneOutcome:
-    """E21（情境分类 macro-F1）**当前无法诚实地测**。
+def _scene_acoustic_holdout(ctx: Any) -> SceneOutcome:
+    """E21（情境分类 macro-F1）—— **用真实数据算出来了，而且结果是否定的**。
 
-    ## 为什么不给一个数字
+    ## 这个场景以前是「不可测」，现在是「测了，而且不好」
 
-    `data/priors/catmeows_stats.json` 里全部是占位值：
+    以前先验文件里全是占位值，所以算出的任何数字都只反映「拟合占位值的程度」。
+    现在换成了 CatMeows 真实统计（`scripts/build_priors.py` 构建，
+    21 只猫里留出 4 只），于是它变成一个真的测量：
 
-    ```json
-    {"version": "placeholder-v0", "reviewed": false, "is_placeholder": true}
-    ```
+        留出 macro-F1    0.364
+        多数类基线       0.506
 
-    群体先验尚未构建（`DESIGN.md` §7.3 U3）。在这种情况下算出的 macro-F1
-    测的是「模型拟合占位值的程度」，而不是「它能不能识别这只猫的情绪」——
-    **那个数字没有任何意义，但它有数字的外观**，会被引用、被传播。
+    **比「总是猜多数类」还差。** 六个可用特征的分离度全在 0.32–0.72，
+    分布大幅重叠。
 
-    所以这个场景**不产出任何指标**，只产出一条 `Blocked`。
+    ## 所以本场景测两件事
 
-    这比「跳过」强：跳过会让报告里少一行，读的人以为都测过了。
+    1. **记录这个数字** —— 一个负面结果也是结果，而且是这次评测里
+       信息量最大的一个：它回答了「群体先验到底能不能用」。
+    2. **验证系统对此的反应是对的** —— 它**不能**拿着这份先验去输出
+       后验概率。那才是真正要测的行为：一个不具区分度的先验
+       产出的概率不是证据，是一个看起来很确定的噪声。
+
+    第 2 条比第 1 条重要：数据好坏是运气，**系统能不能正确处理坏数据是设计**。
     """
     import json
 
@@ -1202,32 +1208,94 @@ def _scene_acoustic_blocked(ctx: Any) -> SceneOutcome:
 
     raw = json.loads(open(_PRIOR_PATH, encoding="utf-8").read())
     is_placeholder = bool(raw.get("is_placeholder", False))
-    reviewed = bool(raw.get("reviewed", False))
+    holdout = raw.get("holdout_eval") or {}
+    macro = holdout.get("macro_f1")
+    baseline = holdout.get("majority_class_baseline")
+    n_cats = len(holdout.get("holdout_cats") or [])
 
-    blocked = Blocked(
-        item="E21 声学情境分类 macro-F1",
-        reason=(
-            f"群体先验是占位值（is_placeholder={is_placeholder}, reviewed={reviewed}）——"
-            "用占位数据算出的分类指标测的是「拟合占位值的程度」，不是识别能力"
-        ),
-        needs=(
-            "① CatMeows 真实统计量替换 data/priors/catmeows_stats.json；"
-            "② 21 只猫中留出 4 只做 hold-out，不参与先验统计（否则测的是过拟合）"
-        ),
-    )
+    # 先验还是占位值 → 仍然不可测（保留这条路径：将来重新用占位文件时仍成立）
+    if is_placeholder or macro is None:
+        return SceneOutcome(
+            metrics={},
+            checks=[],
+            blocked=[
+                Blocked(
+                    item="E21 声学情境分类 macro-F1",
+                    reason=(
+                        "先验文件含占位值或未做留出评估"
+                        f"（is_placeholder={is_placeholder}, "
+                        f"holdout_eval={'有' if holdout else '无'}）"
+                    ),
+                    needs=(
+                        "运行 `python scripts/build_priors.py <catmeows-dir> "
+                        "--out data/priors/catmeows_stats.json --holdout 4`"
+                    ),
+                )
+            ],
+            notes=["给一个用占位数据算出的 macro-F1 比没有数字更糟：它有数字的样子"],
+            samples=0,
+        )
+
+    margin = macro - baseline
+
+    # ── 系统对这些数字的反应是否正确 ──
+    from app.interpreter import PriorTable
+    from app.interpreter.router import _prior_verdict
+
+    table = PriorTable.load(_PRIOR_PATH)
+    usable, why = _prior_verdict(table)
+    claims_posterior = usable  # 可用就意味着会输出后验概率
+    correctly_refuses = (margin <= 0.0) == (not claims_posterior)
+
+    per_class = holdout.get("per_class") or {}
+    worst = min(per_class.items(), key=lambda kv: kv[1]["f1"]) if per_class else None
 
     return SceneOutcome(
-        metrics={},
-        checks=[],
-        blocked=[blocked],
+        metrics={
+            "留出_macro_F1": float(macro),
+            "留出_准确率": float(holdout.get("accuracy", 0.0)),
+            "多数类基线": float(baseline),
+            "区分度余量": float(margin),
+            "留出猫数": float(n_cats),
+            "参与评估样本": float(holdout.get("n_scored", 0)),
+        },
+        checks=[
+            Check(
+                "系统不会用不具区分度的先验输出后验概率",
+                correctly_refuses,
+                f"先验的 macro-F1 比基线低 {abs(margin):.3f}，"
+                f"但系统仍声称可用（{why}）—— 那会输出看起来确定的噪声",
+            ),
+            Check(
+                "先验文件记录了留出评估",
+                n_cats > 0,
+                "没有留出猫数就无法判断这个数字是怎么来的",
+            ),
+        ],
+        # **不把「macro-F1 低」当成失败。**
+        # 那是数据的性质，不是代码的 bug。把它做成红色断言会让人去「修」
+        # 一个修不了的东西，或者更糟：去调数据直到指标好看。
         notes=[
-            "本场景**刻意不产出数字**。给出一个用占位数据算出的 macro-F1 "
-            "比没有数字更糟：它有数字的样子，会被引用",
-            "同理受限的还有：E23 置信度校准（需真实标注）、"
+            f"**真实测量结果：留出 macro-F1 {macro:.3f} < 多数类基线 {baseline:.3f}**。"
+            f"这份群体先验在没见过的猫上不如「总是猜多数类」",
+            "特征分离度（情境间均值差/标准差）全在 0.32–0.72 —— 分布大幅重叠。"
+            "最可能是：本项目的提取器与论文不同，或论文按样本而非按猫划分",
+            "留出是按**猫**划分的（DESIGN §6.1 要求）—— 按样本划分会因同一只猫"
+            "同时出现在两边而虚高，那测的是「认不认得这只猫」而非泛化",
+            "结论：`acoustic_plus_history` 模式在本数据集上不可用；"
+            "个体化（案例推理）才是可靠路径",
+            "仍不可测：E23 置信度校准（需带标注的测试集）、"
             "E25–E29 视觉（需兽医评分）",
         ],
-        samples=0,
+        details=[
+            {"label": k, **v} for k, v in sorted(per_class.items())
+        ],
+        samples=int(holdout.get("n_scored", 0)),
     )
+
+
+#: 保留旧名，避免外部引用断掉。
+_scene_acoustic_blocked = _scene_acoustic_holdout
 
 
 # =============================================================================
@@ -1317,12 +1385,12 @@ ALL_SCENES: tuple[Scene, ...] = (
         run=_scene_latency,
     ),
     Scene(
-        scene_id="acoustic-blocked",
-        name="声学分类（不可测）",
+        scene_id="acoustic-holdout",
+        name="声学分类（留出猫）",
         layer=Layer.B,
         items=("E21",),
-        question="它能识别这只猫的情绪吗？",
-        run=_scene_acoustic_blocked,
+        question="群体先验能识别没见过的猫的情绪吗？",
+        run=_scene_acoustic_holdout,
     ),
 )
 
