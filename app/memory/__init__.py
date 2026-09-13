@@ -16,12 +16,14 @@ from app.memory.flywheel import (
 )
 from app.memory.retrieval import (
     MMR_LAMBDA,
+    RetrievalResult,
     RetrievalWeights,
     build_context_block,
     mmr_select,
     pending_memories,
     recency_score,
     retrieve,
+    retrieve_with_status,
     score_item,
     support_score,
 )
@@ -42,6 +44,8 @@ __all__ = [
     "PROMOTION_MIN_SPAN_DAYS",
     # 检索
     "retrieve",
+    "retrieve_with_status",
+    "RetrievalResult",
     "score_item",
     "mmr_select",
     "build_context_block",

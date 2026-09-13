@@ -33,6 +33,16 @@ from app.schemas import (
 from app.store.base import DuplicateMemory, InvariantViolation, NotFound
 
 
+def _tenant_of(obj: object) -> tuple[str, str]:
+    """取 `(user_id, pet_id)`。级联删除与租户过滤都用它。
+
+    写成函数而不是各处 `obj.user_id, obj.pet_id`：
+    多一个取值路径，就多一个写错字段名的地方，
+    而写错的后果是**删掉了别人的数据**。
+    """
+    return (getattr(obj, "user_id", ""), getattr(obj, "pet_id", ""))
+
+
 @dataclass
 class _StoredMemory:
     event: MemoryEvent
@@ -301,6 +311,52 @@ class InMemoryStore:
             )
             for sim, ev in scored[:limit]
         ]
+
+    # ── 级联硬删 ─────────────────────────────────────
+
+    def delete_pet_data(self, *, user_id: str, pet_id: str) -> int:
+        """**级联硬删**该宠物的全部数据，返回删除条数。
+
+        与 `HealthRecordStore.delete_pet_data` 同一语义：
+        软标记不满足删除要求 —— 一条标了 `deleted=True` 的记录
+        仍然是泄露风险。
+
+        与 `MySQLStore` 的同名方法必须行为一致，否则「删除」这件事
+        在测试环境与生产会是两回事（而测试环境是通过的那个）。
+        """
+        removed = 0
+
+        for mid in [
+            k for k, v in self._memories.items() if _tenant_of(v.event) == (user_id, pet_id)
+        ]:
+            del self._memories[mid]
+            removed += 1
+
+        # 去重索引要同步清 —— 不清的话，删掉重记时那条 key 永远冲突，
+        # 而报错是 DuplicateMemory，看起来像「重复写入」而不是「索引残留」。
+        for key, mid in list(self._dedup_index.items()):
+            if mid not in self._memories:
+                del self._dedup_index[key]
+
+        for rid in [
+            k for k, v in self._meow_records.items() if _tenant_of(v) == (user_id, pet_id)
+        ]:
+            del self._meow_records[rid]
+            removed += 1
+
+        for iid in [
+            k for k, v in self._pending.items() if _tenant_of(v) == (user_id, pet_id)
+        ]:
+            del self._pending[iid]
+            removed += 1
+
+        for mdid in [
+            k for k, v in self._messages.items() if _tenant_of(v) == (user_id, pet_id)
+        ]:
+            del self._messages[mdid]
+            removed += 1
+
+        return removed
 
     # ── 不变量（深度防御） ────────────────────────────────
 

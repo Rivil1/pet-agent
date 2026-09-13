@@ -186,6 +186,21 @@ export function ChatPage({
                 <p className="whitespace-pre-wrap text-[14.5px] leading-relaxed text-ink">
                   {m.text}
                 </p>
+                {m.turn?.degraded && m.turn.degraded_notice && (
+                  // 降级提示必须可见。
+                  //
+                  // 检索不可用时，模型会自信地说出「没有相关记录」——
+                  // 而用户无法从这句话分辨「真的没记录」与「根本没查成」。
+                  // 不显示这条，系统就在为自己没做过的事打包票。
+                  <div className="mt-2.5 rounded-[2px] border border-l-[3px] border-rule border-l-ochre/60 bg-ochre/[0.05] px-2.5 py-2">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ochre">
+                      部分能力未生效
+                    </p>
+                    <p className="mt-1 text-[11.5px] leading-relaxed text-ink-soft">
+                      {m.turn.degraded_notice}
+                    </p>
+                  </div>
+                )}
                 {m.turn?.mock_notice && (
                   <p className="mt-2.5 text-[11.5px] leading-relaxed text-ochre">
                     {m.turn.mock_notice}

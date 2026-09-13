@@ -56,7 +56,7 @@ from app.api import create_app
 from app.audio.features import TARGET_SR, extract_features
 from app.interpreter import PriorTable
 from app.llm import Providers, build_providers
-from app.store import InMemoryStore
+from app.store.factory import StoreBundle, build_store_from_env
 
 #: 项目根（`app/` 的上一级）。用于定位 `data/`。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -153,6 +153,7 @@ def create_app_from_env(
     feature_extractor: Any | None = None,
     prior_path: str | Path | None = None,
     store: Any | None = None,
+    health_store: Any | None = None,
 ) -> Any:
     """把环境变量装配成一个可启动的 app。
 
@@ -161,13 +162,29 @@ def create_app_from_env(
 
     Raises:
         BootstrapError: 缺少鉴权密钥，或先验文件不存在。
+        ValueError: 存储配置不完整（例如指定了 mysql 但缺 MYSQL_PASSWORD）。
     """
     built = providers if providers is not None else build_providers()
     secret = auth_secret or resolve_auth_secret()
     priors = PriorTable.load(prior_path or resolve_priors_path())
 
-    return create_app(
-        store=store if store is not None else InMemoryStore(),
+    # 存储后端：显式注入 > 环境变量。
+    #
+    # 向量维度从 provider 配置取，**不重新读环境变量** ——
+    # 两处各读一次的话，改了 `PET_AGENT_EMBED_MODEL`（维度不同）却只重启了一半，
+    # 建 collection 时才会因为维度不符报错，而那个报错离根因很远。
+    bundle: StoreBundle | None = None
+    if store is not None:
+        resolved_store = store
+        resolved_health = health_store
+    else:
+        bundle = build_store_from_env(dim=built.config.embed_dim if built.config else 1024)
+        resolved_store = bundle.store
+        resolved_health = health_store if health_store is not None else bundle.health_store
+
+    # 装配结果挂到 app.state 上，供 /healthz 与运维查看
+    app = create_app(
+        store=resolved_store,
         embedder=built.embedder,
         llm=built.llm,
         prior=priors,
@@ -177,7 +194,11 @@ def create_app_from_env(
         # `built.multimodal` 为 None 时节点走「未配置」降级，
         # 而不是「配置了但失败」—— 两者对用户的提示不同。
         media_extractor=built.multimodal,
+        health_store=resolved_health,
     )
+    if bundle is not None:
+        app.state.store_bundle = bundle
+    return app
 
 
 def _main(argv: list[str] | None = None) -> int:

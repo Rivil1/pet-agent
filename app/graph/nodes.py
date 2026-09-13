@@ -32,6 +32,7 @@ from app.memory import (
     build_context_block,
     pending_memories,
     retrieve,
+    retrieve_with_status,
 )
 from app.profile import VisionAnalyzer, identify_from_photos
 from app.schemas import (
@@ -353,7 +354,7 @@ def make_memory_retriever(store: MemoryStore, embedder):
         intent = state.get("intent", InputIntent.CHAT)
         k = policy_for(intent).retrieval_k if intent in InputIntent else 5
 
-        items = retrieve(
+        result = retrieve_with_status(
             store=store,
             embedder=embedder,
             user_id=user_id,
@@ -362,7 +363,28 @@ def make_memory_retriever(store: MemoryStore, embedder):
             k=k,
             wanted_types=_INTENT_EVENT_TYPES.get(intent),
         )
+        items = result.items
         pending = pending_memories(store, user_id=user_id, pet_id=pet_id)
+
+        if result.degraded:
+            # **降级要显式留痕，不能表现为「召回了 0 条」。**
+            #
+            # 向量索引不可用时（例如只配了 MySQL、没配 Milvus），
+            # 「查不到」与「没有」在用户看来完全一样 ——
+            # 而系统会据此自信地说出「没有相关记录」。
+            # 写进 trace 并置 degraded，用户才知道这一次是没查成。
+            return AgentState(
+                retrieved_memories=items,
+                pending_memories=pending,
+                node_trace=[
+                    _trace(
+                        "memory_retriever",
+                        started=started,
+                        decision=f"检索降级：{result.degraded_reason}",
+                        degraded=True,
+                    )
+                ],
+            )
 
         return AgentState(
             retrieved_memories=items,

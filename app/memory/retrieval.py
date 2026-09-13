@@ -31,6 +31,7 @@ from app.schemas import (
     ScoreBreakdown,
 )
 from app.store.base import MemoryStore
+from app.store.vectors import VectorIndexUnavailable
 
 
 def _now() -> datetime:
@@ -123,21 +124,91 @@ def retrieve(
     recall_limit: int = 20,
     now: datetime | None = None,
 ) -> list[MemoryItem]:
-    """完整检索管线。
+    """完整检索管线。**只返回命中**。
 
     Args:
         k: 最终返回条数。
         wanted_types: 路由推断出的相关事件类型。为 ``None`` 表示不做类型加权。
         recall_limit: 向量召回条数（重排序前的候选规模）。
+
+    需要知道「是否降级」时用 `retrieve_with_status` ——
+    本函数把降级压成了空列表，而空列表无法区分
+    「确实没有」与「根本没查成」。
+    """
+    return retrieve_with_status(
+        store=store,
+        embedder=embedder,
+        user_id=user_id,
+        pet_id=pet_id,
+        query=query,
+        k=k,
+        wanted_types=wanted_types,
+        weights=weights,
+        recall_limit=recall_limit,
+        now=now,
+    ).items
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    """一次检索的完整结果：命中 + **降级原因**。
+
+    ## 为什么需要一个类型，而不是只返回 `list`
+
+    向量索引不可用时，`[]`（空命中）与「这只猫确实没有相关记忆」
+    在调用方看来完全一样。而两者的用户可见行为应当不同：
+
+    | 情况 | 正确的行为 |
+    |---|---|
+    | 确实没有记忆 | 「我还不知道它这件事」 |
+    | 索引挂了 | 「检索暂时不可用」—— 不能让用户以为系统查过了 |
+
+    把两者压成同一个 `[]`，系统会自信地对一个它压根没查过的问题作答。
+    所以降级必须是一个**显式字段**，由节点写进 trace（与 D40/D45 同一取向）。
+    """
+
+    items: list[MemoryItem]
+    degraded_reason: str | None = None
+
+    @property
+    def degraded(self) -> bool:
+        return self.degraded_reason is not None
+
+
+def retrieve_with_status(
+    *,
+    store: MemoryStore,
+    embedder: Embedder,
+    user_id: str,
+    pet_id: str,
+    query: str,
+    k: int = 5,
+    wanted_types: frozenset[EventType] | None = None,
+    weights: RetrievalWeights = RetrievalWeights(),
+    recall_limit: int = 20,
+    now: datetime | None = None,
+) -> RetrievalResult:
+    """与 `retrieve` 同逻辑，但把**降级原因**一并返回。
+
+    节点走这个入口；只想拿结果的调用方仍可用 `retrieve()`。
     """
     query_vector = embedder.embed(query)
 
     # ① 结构化预过滤（在 store 内部完成：pet_id + status=active）
-    recalled = store.search_memories(
-        user_id=user_id, pet_id=pet_id, query_vector=query_vector, limit=recall_limit
-    )
+    try:
+        recalled = store.search_memories(
+            user_id=user_id, pet_id=pet_id, query_vector=query_vector, limit=recall_limit
+        )
+    except VectorIndexUnavailable as exc:
+        # **降级而不是抛。**
+        #
+        # 后端可能没配 Milvus（纯 MySQL 部署），或 Milvus 临时不可达。
+        # 共同点是「查不到」不等于「没有」。把原话带出去，
+        # 让 trace 与用户提示能说清楚发生了什么。
+        return RetrievalResult(items=[], degraded_reason=str(exc))
+
     if not recalled:
-        return []
+        return RetrievalResult(items=[])
 
     # ② 重排序
     scored = [
@@ -154,7 +225,7 @@ def retrieve(
     scored.sort(key=lambda i: i.score, reverse=True)
 
     # ③ 多样性裁剪
-    return mmr_select(scored, embedder=embedder, n=k)
+    return RetrievalResult(items=mmr_select(scored, embedder=embedder, n=k))
 
 
 def mmr_select(

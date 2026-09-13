@@ -12,9 +12,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, time, timedelta, timezone
-import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -73,7 +73,9 @@ def _pet_brief(pet: PetProfile) -> dict[str, Any]:
     return {
         "pet_id": pet.pet_id,
         "name": pet.name,
-        "species": pet.species.value if hasattr(pet.species, "value") else str(pet.species),
+        "species": pet.species.value
+        if hasattr(pet.species, "value")
+        else str(pet.species),
         "breed": pet.breed,
         "has_profile": bool(pet.must_keep_features) or bool(visual.fur_color),
         "must_keep_features": list(pet.must_keep_features),
@@ -81,6 +83,7 @@ def _pet_brief(pet: PetProfile) -> dict[str, Any]:
         "eye_color": visual.eye_color,
         "created_at": pet.created_at.isoformat(),
     }
+
 
 # ─────────────────────────────────────────────────────────────
 # 请求 / 响应模型
@@ -317,6 +320,24 @@ def create_app(
         """
         return _env_flag(ENV_ALLOW_DEV_LOGIN)
 
+    def _store_info() -> dict[str, str]:
+        """存储后端描述。
+
+        ⚠️ **在请求时调用，不在装配时冻结。**
+        `app.state.store_bundle` 是 `create_app` **返回之后**才挂上去的
+        （见 `app/bootstrap.py`）—— 在这里提前求值会永远拿到兜底分支，
+        于是 `/healthz` 永远报 “unknown”，而那是静默的：
+        探针看起来正常，只是信息是错的。
+        """
+        bundle = getattr(app.state, "store_bundle", None)
+        if bundle is not None and hasattr(bundle, "describe"):
+            try:
+                return dict(bundle.describe())
+            except Exception as exc:  # noqa: BLE001 - 探针不能因为描述失败而挂
+                return {"store": "error", "reason": str(exc)[:200]}
+        # 注入式装配（测试）走这里。**不编造细节**，只报类型。
+        return {"store": type(store).__name__, "durable": "unknown"}
+
     memory_writer = MemoryWriter(store=store, embedder=embedder)
     _health_store = health_store or InMemoryHealthStore()
     health_writer = HealthWriter(
@@ -388,6 +409,12 @@ def create_app(
             "status": "ok",
             "providers": provider_info,
             "observability": observability_info,
+            # 存储后端与向量索引状态。
+            #
+            # **必须暴露**：内存后端与 MySQL 后端在功能上无法从行为区分，
+            # 但一个重启就丢数据、另一个不会。看不到这一项时，
+            # 「数据没了」会被当成 bug 排查很久，而它其实是配置。
+            "storage": _store_info(),
             # 前端据此决定要不要显示「开发登录」入口。
             # 暴露它是安全的：它只说明开关状态，不泄露密钥。
             "dev_login": "enabled" if dev_login_enabled() else "disabled",
@@ -448,7 +475,9 @@ def create_app(
                     ),
                 },
             )
-        token = issue_token(body.user_id, secret=auth_secret, ttl_seconds=DEFAULT_TTL_SECONDS)
+        token = issue_token(
+            body.user_id, secret=auth_secret, ttl_seconds=DEFAULT_TTL_SECONDS
+        )
         return {
             "token": token,
             "user_id": body.user_id,
@@ -940,6 +969,24 @@ def _run(
     guard = result.get("guard_result")
     interp = result.get("interpretation")
     features = result.get("acoustic_features")
+    node_traces = list(result.get("node_trace", []))
+
+    # ── 降级的**聚合** ──
+    #
+    # 初版只看 guard 的 `degrade_to_conservative`，于是记忆检索降级
+    # （例如 Milvus 不可用）时，**节点 trace 里标了 degraded=true，
+    # 而响应顶层的 degraded 却是 false** —— 前端据此判断“一切正常”，
+    # 而用户看到的是一句没有依据的“没有相关记录”。
+    #
+    # 降级是“这次结果没有正常产生”这一类事实的整体属性，
+    # 所以看全部来源，而不是只看守卫。
+    degraded_nodes = [t for t in node_traces if t.degraded]
+    guard_degraded = bool(guard and guard.degrade_to_conservative)
+    degraded = guard_degraded or bool(degraded_nodes)
+
+    notice = guard.degraded_notice if guard else None
+    if notice is None and degraded_nodes:
+        notice = "；".join(f"{t.node}: {t.decision}" for t in degraded_nodes)
 
     # ── 存档解释，等主人标注 ──
     # 只有**真有声学特征**时才存档：没有特征就没有可标注的东西，
@@ -960,8 +1007,8 @@ def _run(
         session_id=session_id,
         trace_id=trace_id,
         langsmith_run_id=langsmith_run_id,
-        degraded=bool(guard and guard.degrade_to_conservative),
-        degraded_notice=guard.degraded_notice if guard else None,
+        degraded=degraded,
+        degraded_notice=notice,
         trace=[
             TraceItem(
                 node=t.node,
@@ -969,7 +1016,7 @@ def _run(
                 decision=t.decision,
                 degraded=t.degraded,
             )
-            for t in result.get("node_trace", [])
+            for t in node_traces
         ],
         retrieved_count=len(result.get("retrieved_memories", [])),
         written_memory_ids=result.get("written_memory_ids", []),

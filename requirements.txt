@@ -14,5 +14,13 @@ soundfile>=0.12.0
 # ARCHITECTURE §4.2 明确选了 HMAC 而不是 JWT（无跨服务 / 无第三方登录 / 无刷新令牌）。
 # 所以不需要 PyJWT。
 PyYAML>=6.0
+
+# ── 存储层 ────────────────────────────────────────────────
+# PyMySQL 是**纯 Python** 实现：不需要编译，在国内服务器上装得快得多，
+# 也不需要镜像里有 gcc/mysqlclient 头文件。
+# 性能上它比 mysqlclient 慢一些，但本项目不是连接数或 QPS 瓶颈。
+pymilvus>=2.4.0
+PyMySQL>=1.1.0
+
 pytest>=7.4.0
 pyright>=1.1.300
