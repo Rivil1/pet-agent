@@ -224,6 +224,14 @@ class TurnResponse(BaseModel):
     trace: list[TraceItem] = Field(default_factory=list)
     retrieved_count: int = 0
     written_memory_ids: list[str] = Field(default_factory=list)
+    interaction_mode: str = Field(
+        default="companion",
+        description=(
+            "本次互动走的模式（`companion` / `analysis`）。\n\n"
+            "**它只决定说多少证据，不决定谁在说话** —— 两轨的身份都是那只猫本人。\n"
+            "带它是为了让「为什么这次开始讲证据了」可回答。"
+        ),
+    )
     provider_mode: str = Field(
         default="unknown",
         description=(
@@ -1090,6 +1098,7 @@ def _run(
         ],
         retrieved_count=len(result.get("retrieved_memories", [])),
         written_memory_ids=result.get("written_memory_ids", []),
+        interaction_mode=result.get("interaction_mode", "companion"),
         provider_mode=(provider_info or {}).get("mode", "unknown"),
         mock_notice=_trust_notice(provider_info),
         suggested_actions=[

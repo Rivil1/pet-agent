@@ -330,7 +330,7 @@ class TestHappyPaths:
         r = _invoke(graph, text="记住它很怕吸尘器的声音")
         assert r["intent"].value == "record_event"
         assert r["written_memory_ids"]
-        assert "已记录" in r["final_response"]
+        assert "记住啦" in r["final_response"]
         assert len(store.list_memories(user_id="user-1", pet_id="pet-1")) == 1
 
     def test_interpret_with_real_features(self, graph, pet):
@@ -344,7 +344,19 @@ class TestHappyPaths:
         assert interp.evidence_mode.value == "measured_only"
         assert all(c.posterior is None for c in interp.candidates)
         assert interp.evidence, "证据链不得为空"
-        assert "依据" in r["final_response"]
+        # 断言**证据确实到达了用户**，而不是某个固定标签。
+        # 渲染文案是猫的口吻（「我这么想是因为…」），标签会变；
+        # 而「证据有没有出现在回复里」才是这个测试要保的东西 ——
+        # 它一旦断了，用户就只能看到一个没有依据的猜测。
+        assert "我这么想是因为" in r["final_response"], r["final_response"][:200]
+        claimed = interp.evidence[0].statement[:12]
+        assert claimed in r["final_response"], (
+            f"证据原文未出现在回复中：{claimed!r}"
+        )
+        # 归因值（+0.45 这类）**不该**出现在给用户看的文本里
+        assert "0.4" not in r["final_response"].replace("0.45", ""), (
+            "log_odds 贡献值是分析中间量，不该渲染给用户"
+        )
 
     def test_case_based_when_records_suffice(self, graph, pet, store):
         """记录够多时应当走到 case_based，并给出**计数**而非概率。"""
@@ -380,8 +392,15 @@ class TestHappyPaths:
         """**AMBIGUOUS 是独立分支**，不回退到闲聊（DESIGN.md §5.1）。"""
         r = _invoke(graph, text="嗯")
         assert r["intent"].value == "ambiguous"
-        assert "不太确定" in r["final_response"]
         assert any(t.node == "clarify_ask" for t in r["node_trace"])
+        # 澄清文案是**猫的口吻**（身份不分轨），断言行为而不是某句固定措辞 ——
+        # 措辞会随文案调整而变，而「有没有走澄清分支」才是这个测试要保的东西。
+        assert "想问" in r["final_response"], (
+            f"澄清回复应给出可选方向，实际：{r['final_response']}"
+        )
+        assert "它" not in r["final_response"].replace("问它", ""), (
+            "说话的是它本人，不应用第三人称指代自己"
+        )
 
     def test_profile_is_loaded_before_downstream_nodes(self, graph, pet):
         """回归：档案必须在入口就被加载。
@@ -484,7 +503,7 @@ class TestDegradationPaths:
         否则「记住，它没问题」会被改成「我这边暂时没有相关记录」，用户无法理解。
         """
         r = _invoke(graph, text="记住，它一向没问题")
-        assert "已记录" in r["final_response"], (
+        assert "记住啦" in r["final_response"], (
             "guard_mode=echo_only 时应跳过禁用词检查；"
             f"实际响应：{r['final_response']!r}"
         )

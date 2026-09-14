@@ -72,6 +72,12 @@ class AgentState(TypedDict, total=False):
     route_confidence: float
     route_slots: RouteSlots
 
+    #: 交互模式（`app/companion`）。**它只决定说多少证据，不决定谁在说话。**
+    #:
+    #: 两轨的身份都是那只猫本人 —— 所以这里不需要「角色扮演标注」：
+    #: 它不是扮演，是这个产品的声音。
+    interaction_mode: str
+
     # ── 上下文 ──
     pet_profile: PetProfile | None
     retrieved_memories: list[MemoryItem]
@@ -143,6 +149,10 @@ def initial_state(
         session_id=session_id or str(uuid.uuid4()),
         trace_id=trace_id or str(uuid.uuid4()),
         raw_input=raw_input,
+        # 缺省陪伴轨 —— **默认值的选择是刻意的**：误判为分析轨的代价
+        # （冷场、说教）高于误判为情绪轨（少给一次证据，用户会追问）。
+        # 真实判定在 `understand_input` 里，那里能看到文本与音频。
+        interaction_mode="companion",
         retrieved_memories=[],
         pending_memories=[],
         candidate_memories=[],

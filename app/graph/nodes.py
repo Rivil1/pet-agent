@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
+from app.companion import decide_mode, pet_prompt
 from app.graph.normalize import parse_time_range
 from app.graph.state import (
     AgentState,
@@ -32,13 +34,12 @@ from app.memory import (
     MemoryWriter,
     build_context_block,
     pending_memories,
-    retrieve,
     retrieve_with_status,
 )
 from app.profile import VisionAnalyzer, identify_from_photos
 from app.schemas import (
-    SUBJECT_FALLBACK_PREFIX,
     FORBIDDEN_PHRASES,
+    SUBJECT_FALLBACK_PREFIX,
     AudioKind,
     ConversationTurn,
     ErrorKind,
@@ -193,11 +194,31 @@ def understand_input(state: AgentState) -> AgentState:
         decision = f"intent={routed.value} conf={confidence:.2f}"
 
     route_slots = slots.model_copy(update={"time_range": slots.time_range})
+
+    # ── 交互模式（**身份不分轨，只有说多少证据分轨**）──
+    #
+    # 用规则判定而不用 LLM 自报置信度（`docs/11` §5.2）——
+    # 规则表可枚举、可测试、可复现，而且规避了「LLM 置信度未校准」
+    # （`docs/10-self-review.md` D1）。
+    mode, mode_reason = decide_mode(
+        raw=raw,
+        text=text,
+        recent_turn_count=len(state.get("recent_turns", []) or []),
+    )
+
     return AgentState(
         intent=routed,
         route_confidence=confidence,
         route_slots=route_slots,
-        node_trace=[_trace("understand_input", started=started, decision=decision)],
+        interaction_mode=mode.value,
+        node_trace=[
+            _trace("understand_input", started=started, decision=decision),
+            _trace(
+                "understand_input",
+                started=started,
+                decision=f"mode={mode.value}（{mode_reason}）",
+            ),
+        ],
     )
 
 
@@ -442,9 +463,12 @@ def clarify_ask(state: AgentState) -> AgentState:
     started = _now()
     conf = state.get("route_confidence", 0.0)
     return AgentState(
+        # **猫的口吻**，不用「它」—— 说话的就是它本人。
+        # 初版这里是「我不太确定你想问什么。你是想问它最近怎么样…」：
+        # 助手腔 + 第三人称，与产品身份矛盾。
         draft_response=(
-            "我不太确定你想问什么。你是想问它最近怎么样、想记住一件事，"
-            "还是想让我看看它的叫声？"
+            "唔…你是想问我最近怎么样，"
+            "还是想记点我的事？"
         ),
         node_trace=[
             _trace(
@@ -458,16 +482,6 @@ def clarify_ask(state: AgentState) -> AgentState:
 # 3. companion_agent
 # ─────────────────────────────────────────────────────────────
 
-#: 系统提示。**三层信息分离规则必须显式注入** —— 这是 prompt 层面的防线，
-#: 硬约束由 ``response_guard`` 提供（prompt 是建议，节点是强制）。
-_SYSTEM_PROMPT = """你是用户宠物猫的陪伴助手。
-
-规则：
-1. 只使用「已知事实」中的信息回答。没有记录的事就说没有记录，不要推测或用常识补全。
-2. 不要声称超出证据的确定性。推测必须标明是推测。
-3. 「待确认」列表里的是系统推断，**不得当作事实使用**。
-4. 不要给兽医诊断、疾病名称或用药建议。
-5. 回复简短、自然、有温度。"""
 
 
 def make_companion_agent(llm: LLMClient):
@@ -478,7 +492,11 @@ def make_companion_agent(llm: LLMClient):
         pet = state.get("pet_profile")
         if pet is None:
             return AgentState(
-                draft_response="我还没有这只猫的档案，先上传几张照片让我认识它吧。",
+                # 没档案时它还不「存在」，所以说的是「咱们还没认识」——
+                # 而不是「我还没有档案」（那是系统在说话）。
+                draft_response=(
+                    "咱们还没正式认识呢 —— 传几张我的照片，把我记下来？"
+                ),
                 node_trace=[
                     _trace("companion_agent", started=started, decision="无档案")
                 ],
@@ -496,13 +514,25 @@ def make_companion_agent(llm: LLMClient):
             recent_turns=recent_turns,
         )
         user_text = state.get("transcribed_text") or require_input(state).text or ""
-        system = f"{_SYSTEM_PROMPT}\n\n{block.render()}"
+
+        # **身份只有一个 —— 那只猫本人。** 模式只决定说多少证据。
+        mode = state.get("interaction_mode", "companion")
+        system = f"{pet_prompt(pet, mode=mode)}\n\n{block.render()}"
 
         try:
             draft = llm.complete(system=system, user=user_text)
         except Exception as exc:  # noqa: BLE001 — 降级而非崩溃
             return AgentState(
-                draft_response="抱歉，我现在有点忙不过来，稍后再试试？",
+                # ⚠️ **这一段刻意不用猫的口吻。**
+                #
+                # 上游模型故障是**系统问题**。说成「我有点忙不过来」
+                # 会把系统故障归因到猫身上 —— 用户会以为它不想理人，
+                # 而真相是服务挂了。那种错位是欺骗，不是陪伴。
+                #
+                # 用括号标出「这是系统在说话」，与猫的声音分开。
+                draft_response=(
+                    "（这边连接出了点问题，不是你说话的问题 —— 稍后再跟我说一次？）"
+                ),
                 errors=[
                     NodeError(
                         node="companion_agent",
@@ -754,9 +784,12 @@ def make_behavior_interpreter(
                 ],
                 evidence=_observed_evidence(observation),
                 suggested_observation="录一段叫声，或在描述里补充它当时的动作与场景",
+                # 契约字段写成**精确、无 markdown** 的说法：
+                # 它的读者是 API 消费者与审计，不是终端用户 ——
+                # 给用户看的措辞由 `render_interpretation` 决定。
                 limitations=(
-                    "本次没有可分析的叫声音频，因此**不给出数值置信度**。"
-                    "请上传一段猫叫录音以获得基于声学证据的判断。"
+                    "本次没有可分析的叫声音频，因此不给出数值置信度。"
+                    "上传一段猫叫录音可获得基于声学证据的判断。"
                 ),
             )
             return AgentState(
@@ -971,52 +1004,161 @@ def _append_observed(interp, observation):
 
 
 def render_interpretation(state: AgentState) -> AgentState:
-    """把结构化解释渲染为文本。**不调用模型** —— 模板实现，确定性。"""
+    """把结构化解释渲染为文本。**不调用模型** —— 模板实现，确定性。
+
+    ## 为什么改成猫的口吻
+
+    初版渲染出来的是报告：
+
+        > 等吃的（置信度 68%，共 3 个候选）
+        >
+        > 依据：
+        >   · 基频均值 550Hz，高于该情境的参考值 420Hz（+0.45）
+
+    它在**事实层面是对的**，但说话的不是那只猫，是分析师。
+    而用户问的是「你为什么一直叫」—— 他要的是**猫告诉他**，
+    不是一份标注了置信度的报告。
+
+    ## 改写时**一样东西也不能丢**
+
+    证据、局限、不确定都必须保留 —— 它们是项目的诚实性所在。
+    变的只是说话方式：
+
+    | 报告体 | 猫的口吻 |
+    |---|---|
+    | `置信度 68%` | 「我觉得像是…」 |
+    | `依据：` | 直接说「你录那段我叫得又急又高」 |
+    | `（+0.45）` | 删掉 —— 用户不是在做加权和 |
+    | `本次无法…不给出数值置信度` | 「这个我不好说 —— 你再录一段？」 |
+
+    **归因值（`log_odds_contribution`）在文本里删掉，但仍在 API 的结构化字段里。**
+    想看数值的人走 `GET /v1/interpret` 的 `interpretation` 字段，
+    而跟猫说话的用户不该被那些数字噎住。
+    """
     started = _now()
     interp = state.get("interpretation")
     if interp is None:
         return AgentState(
-            draft_response="我暂时无法解析这段叫声。",
+            # 同样是系统限制，不是猫在说话 —— 用括号分开。
+            draft_response=(
+                "（这段叫声没能解析出来 —— 可能是格式或音质问题。"
+                "你可以描述一下它当时在做什么，或者换一段录音。）"
+            ),
             node_trace=[
                 _trace("render_interpretation", started=started, degraded=True)
             ],
         )
 
-    lines: list[str] = []
-    top = interp.top_candidate
-    if top is not None and top.posterior is not None:
-        lines.append(
-            f"{top.display}（置信度 {top.posterior:.0%}，共 {len(interp.candidates)} 个候选）"
-        )
-    elif top is not None:
-        lines.append(f"{top.display}（未给出数值置信度）")
-    else:
-        lines.append(interp.candidates[0].display if interp.candidates else "无法判断")
-
-    if interp.evidence:
-        lines.append("\n依据：")
-        for e in interp.evidence:
-            # 贡献值只在有概率模型的模式下存在（见 EvidenceItem 契约）。
-            # 无模型时只陈述测量值——不补一个 0.00，那会谎称「已参与计算」。
-            if e.log_odds_contribution is None:
-                lines.append(f"  · {e.statement}")
-            else:
-                sign = "+" if e.log_odds_contribution >= 0 else ""
-                lines.append(
-                    f"  · {e.statement}（{sign}{e.log_odds_contribution:.2f}）"
+    # ── `text_only`：根本没有可用证据 → **不要粘贴 `limitations`** ──
+    #
+    # `limitations` 是给 API 消费者看的精确契约字段，写成分析师的口气
+    # （「本次没有可分析的叫声音频，因此不给出数值置信度」）。
+    # 直接贴给用户就等于让猫拿一份分析报告说话。
+    #
+    # 契约字段保持精确，**怎么说由这一层决定** —— 这正是渲染层存在的理由。
+    if interp.evidence_mode is EvidenceMode.TEXT_ONLY:
+        lines = ["这个我不好说 —— 这次只看到你写的话，没录到我叫。"]
+        if interp.suggested_observation:
+            lines.append("")
+            lines.append(f"（{interp.suggested_observation}）")
+        return AgentState(
+            draft_response="\n".join(lines),
+            node_trace=[
+                _trace(
+                    "render_interpretation",
+                    started=started,
+                    decision="模板渲染（text_only：无证据，用自然说法）",
                 )
+            ],
+        )
+
+    top = interp.top_candidate
+    lines: list[str] = []
+
+    # ── 开场：用猫的口吻给出猜测，**不给百分比** ──
+    if top is not None and top.posterior is not None:
+        # 置信度分档 → 语气强弱（不给数字）
+        if top.posterior >= 0.6:
+            lines.append(f"我觉得我大概是想{_plain(top.display)}。")
+        elif top.posterior >= 0.4:
+            lines.append(f"我可能有点想{_plain(top.display)}，但不太确定。")
+        else:
+            lines.append(f"我猜也许是{_plain(top.display)}…说不太准。")
+    elif top is not None:
+        lines.append(f"我可能是想{_plain(top.display)} —— 但这次没测到多少能说的。")
+    else:
+        lines.append("这个我自己也说不上来。")
+
+    # ── 依据：改成人话 ──
+    #
+    # `log_odds_contribution` 刻意**不渲染** —— 它是给分析用的中间量，
+    # 而这里的读者是想知道「它怎么了」的主人。数值仍在 API 结构化字段里。
+    if interp.evidence:
+        spoken = [e.statement for e in interp.evidence[:3]]
+        lines.append("")
+        lines.append("我这么想是因为：" + "；".join(spoken) + "。")
+
+    # ── 相似的过去：猫自己提「我上次也这样」 ──
+    if interp.similar_cases:
+        case = interp.similar_cases[0]
+        when = case.context.value if hasattr(case.context, "value") else str(case.context)
+        lines.append("")
+        lines.append(
+            f"我上次这样叫的时候，你记的是{_plain(when)}"
+            + (f" —— 后来{case.resolution}。" if case.resolution else "。")
+        )
+
+    # ── 局限：用自然的说法，不用公文 ──
+    if interp.limitations:
+        lines.append("")
+        lines.append(_plain_limits(interp.limitations))
 
     if interp.suggested_observation:
-        lines.append(f"\n{interp.suggested_observation}")
-    if interp.limitations:
-        lines.append(f"\n{interp.limitations}")
+        lines.append("")
+        lines.append(f"（{interp.suggested_observation}）")
 
     return AgentState(
         draft_response="\n".join(lines),
         node_trace=[
-            _trace("render_interpretation", started=started, decision="模板渲染")
+            _trace(
+                "render_interpretation",
+                started=started,
+                decision=f"模板渲染（{interp.evidence_mode.value}）",
+            )
         ],
     )
+
+
+def _plain(display: str) -> str:
+    """把候选的展示名改成能接在「我想…」后面的说法。
+
+    候选名是给列表看的（「等吃的」「想出门 / 看门外」），
+    直接接在「我想」后面会读成「我想等吃的」。
+    """
+    text = display.strip()
+    for prefix in ("想要", "想", "等", "要"):
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    return text
+
+
+def _plain_limits(limitations: str) -> str:
+    """把局限说明改成自然的说法。
+
+    `limitations` 是给分析用的（「本次未采集到 call_rate 与 ici_mean」），
+    直接贴给用户就是公文。这里只做**最小改写**：
+    把「未采集/无法测量」这类词换成「没测到」，其余原样保留 ——
+    信息量不能减，它是不确定性的载体。
+    """
+    text = limitations.strip()
+    for src, dst in (
+        ("本次未采集到", "这次没测到"),
+        ("无法可靠测量", "测不太准"),
+        ("因此不给出任何声学测量值", "所以给不出具体的数"),
+        ("不给出数值置信度", "说不准"),
+    ):
+        text = text.replace(src, dst)
+    return text
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1123,14 +1265,23 @@ def extract_candidates(state: AgentState) -> AgentState:
 #: 不假装它们已经正确分组了。
 _SUBJECT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ── 惯例类（习惯聚合主要靠这组）──
-    ("wake_up", (
-        "叫我起床", "叫醒", "叫我起来", "喊我起床", "叫我早",
-        # 更宽的问法：「六点准时叫我」「早上叫我」都指向同一件事。
-        # 放宽的代价：极少数「叫我」其实与起床无关（如「它不喜欢我叫它名字」）。
-        # 那个代价**很小** —— 它们会归到同一个主体下，而习惯层还需要
-        # 次数与跨天重复才会声称习惯，单靠主体相同并不会凭空造出一个习惯。
-        "准时叫", "早上叫", "叫我",
-    )),
+    (
+        "wake_up",
+        (
+            "叫我起床",
+            "叫醒",
+            "叫我起来",
+            "喊我起床",
+            "叫我早",
+            # 更宽的问法：「六点准时叫我」「早上叫我」都指向同一件事。
+            # 放宽的代价：极少数「叫我」其实与起床无关（如「它不喜欢我叫它名字」）。
+            # 那个代价**很小** —— 它们会归到同一个主体下，而习惯层还需要
+            # 次数与跨天重复才会声称习惯，单靠主体相同并不会凭空造出一个习惯。
+            "准时叫",
+            "早上叫",
+            "叫我",
+        ),
+    ),
     ("meowing", ("一直叫", "不停地叫", "叫个不停", "喵喵叫", "半夜叫")),
     ("begging", ("讨食", "要吃的", "要饭", "讨吃的", "蹭腿要")),
     ("sleeping", ("睡觉", "睡在", "午睡", "打盹", "睡姿")),
@@ -1167,9 +1318,10 @@ def _guess_subject(content: str) -> str:
             return subject
     import hashlib
 
-    return SUBJECT_FALLBACK_PREFIX + hashlib.blake2b(
-        content.encode("utf-8"), digest_size=4
-    ).hexdigest()
+    return (
+        SUBJECT_FALLBACK_PREFIX
+        + hashlib.blake2b(content.encode("utf-8"), digest_size=4).hexdigest()
+    )
 
 
 def _guess_polarity(content: str) -> Polarity:
@@ -1228,9 +1380,15 @@ def record_acknowledge(state: AgentState) -> AgentState:
 
     if written and candidates:
         content = candidates[0].content
-        text = f"已记录：{content}。记错了请直接告诉我。"
+        # **猫的口吻，但纠错通道一字不减。**
+        #
+        # D18 把 RECORD_EVENT 定为「执行 + 明确反馈」：假阳性由用户一句话纠正。
+        # 所以「记错了告诉我」这一句是**机制**，不是客套 ——
+        # 换成猫的语气时不能把它删掉。
+        text = f"记住啦 —— {content}。要是记错了，你告诉我一声。"
     else:
-        text = "我这次没能记下来，可以再说一次吗？"
+        # 写库失败是**系统问题**，不是猫不想说 —— 用括号分开。
+        text = "（这次没能存下来，可能是服务的问题 —— 再说一次试试？）"
 
     return AgentState(
         draft_response=text,
@@ -1275,8 +1433,12 @@ def make_profile_analyzer(analyzer: VisionAnalyzer):
         note = draft.coverage_note or f"基于 {draft.analyzed_photo_count} 张照片"
         return AgentState(
             profile_draft=draft,
+            # 建档是**工具确认**，不是对话 —— 所以不用猫的口吻。
+            # 说「我从照片里提取到…」会让猫变成图像分析器，那更怪。
+            # 去掉「我」，只陈述事实。
             draft_response=(
-                f"我从照片里提取到这些稳定特征：{'、'.join(draft.must_keep_features) or '无'}。"
+                f"从照片里提取到这些稳定特征："
+                f"{'、'.join(draft.must_keep_features) or '无'}。"
                 f"（{note}）确认无误吗？"
             ),
             node_trace=[
