@@ -320,3 +320,48 @@ export interface DevLoginResponse {
   user_id: string
   expires_in: number
 }
+
+// ─────────────────────────────────────────────────────────────
+// 日记本体：瞬间与时间线（docs/11 §2.1–2.2）
+// ─────────────────────────────────────────────────────────────
+
+/** 场景标签。固定词表 —— 自由文本无法稳定聚合。 */
+export type MomentScene =
+  | 'sleeping'
+  | 'playing'
+  | 'eating'
+  | 'window'
+  | 'with_human'
+  | 'grooming'
+  | 'other'
+
+export interface Moment {
+  moment_id: string
+  media_url: string
+  /** 用户可选的一句话。**为空是正常的，不是缺失。** */
+  note: string | null
+  scene: MomentScene
+  scene_display: string
+  captured_at: string
+}
+
+export interface TimelineResponse {
+  count: number
+  days: number
+  scene: string | null
+  moments: Moment[]
+  /** 场景分布。只统计出现过的 —— 补零会让「0 次」与「没这个场景」混淆。 */
+  scene_counts: Record<string, number>
+}
+
+export interface RecordMomentResponse {
+  moment: Moment
+  /** 猫对这一刻的回应（模板生成，确定性） */
+  pet_says: string
+}
+
+export interface MediaUploadResponse {
+  url: string
+  kind: 'image' | 'video' | 'audio'
+  bytes: number
+}

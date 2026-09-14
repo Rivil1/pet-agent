@@ -10,7 +10,6 @@
  * 3. **错误归一**。后端的错误体有两种形状（`{detail: {code, message}}`
  *    与 FastAPI 的校验数组），调用方只面对一种。
  */
-
 import type {
   DevLoginResponse,
   HealthResponse,
@@ -22,24 +21,23 @@ import type {
   PetListResponse,
   PetProfile,
   ProfileDraft,
+  MediaUploadResponse,
+  RecordMomentResponse,
   StoryResponse,
+  TimelineResponse,
   TurnResponse,
   AudioKind,
   BehaviorAction,
   ContextLabel,
 } from './types'
-
 /** 同源部署时留空；本地开发由 vite proxy 转发。 */
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
-
 const TOKEN_KEY = 'pet-agent.token'
 const SESSION_KEY = 'pet-agent.session'
 const PET_KEY = 'pet-agent.active-pet'
-
 // ─────────────────────────────────────────────────────────────
 // 凭据与会话
 // ─────────────────────────────────────────────────────────────
-
 export function getToken(): string | null {
   try {
     return localStorage.getItem(TOKEN_KEY)
@@ -47,7 +45,6 @@ export function getToken(): string | null {
     return null
   }
 }
-
 export function setToken(token: string | null): void {
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token)
@@ -56,7 +53,6 @@ export function setToken(token: string | null): void {
     /* 隐私模式下 localStorage 可能不可写 —— 不该因此崩掉整个应用 */
   }
 }
-
 /**
  * 取（或生成）本设备的会话标识。
  *
@@ -74,7 +70,6 @@ export function getSessionId(): string {
     return `web-${Date.now().toString(36)}`
   }
 }
-
 /** 开一个新会话（用户主动「清空对话」时用）。 */
 export function rotateSessionId(): string {
   try {
@@ -84,7 +79,6 @@ export function rotateSessionId(): string {
   }
   return getSessionId()
 }
-
 export function getActivePetId(): string | null {
   try {
     return localStorage.getItem(PET_KEY)
@@ -92,7 +86,6 @@ export function getActivePetId(): string | null {
     return null
   }
 }
-
 export function setActivePetId(petId: string | null): void {
   try {
     if (petId) localStorage.setItem(PET_KEY, petId)
@@ -101,18 +94,14 @@ export function setActivePetId(petId: string | null): void {
     /* ignore */
   }
 }
-
 // ─────────────────────────────────────────────────────────────
 // 错误
 // ─────────────────────────────────────────────────────────────
-
 export type ApiErrorKind = 'network' | 'auth' | 'validation' | 'notfound' | 'server' | 'unknown'
-
 export class ApiError extends Error {
   readonly kind: ApiErrorKind
   readonly status: number
   readonly code: string | null
-
   constructor(kind: ApiErrorKind, message: string, status: number, code: string | null = null) {
     super(message)
     this.name = 'ApiError'
@@ -121,14 +110,11 @@ export class ApiError extends Error {
     this.code = code
   }
 }
-
 /** 把两种错误体归一成一句人话。 */
 function humanize(body: unknown, status: number): { message: string; code: string | null } {
   if (typeof body === 'string' && body.trim()) return { message: body, code: null }
-
   if (body && typeof body === 'object') {
     const detail = (body as Record<string, unknown>).detail
-
     // 形状 A：{detail: {code, message}}
     if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
       const d = detail as Record<string, unknown>
@@ -137,7 +123,6 @@ function humanize(body: unknown, status: number): { message: string; code: strin
         code: typeof d.code === 'string' ? d.code : null,
       }
     }
-
     // 形状 B：FastAPI 校验数组 [{loc, msg, type}]
     if (Array.isArray(detail)) {
       const parts = detail
@@ -150,13 +135,10 @@ function humanize(body: unknown, status: number): { message: string; code: strin
         .filter(Boolean)
       return { message: parts.join('；') || '请求参数不合法', code: 'VALIDATION_FAILED' }
     }
-
     if (typeof detail === 'string') return { message: detail, code: null }
   }
-
   return { message: `请求失败（HTTP ${status}）`, code: null }
 }
-
 function classify(status: number): ApiErrorKind {
   if (status === 401) return 'auth'
   if (status === 404) return 'notfound'
@@ -164,11 +146,9 @@ function classify(status: number): ApiErrorKind {
   if (status >= 500) return 'server'
   return 'unknown'
 }
-
 // ─────────────────────────────────────────────────────────────
 // 请求
 // ─────────────────────────────────────────────────────────────
-
 interface RequestOptions {
   method?: string
   body?: unknown
@@ -176,21 +156,17 @@ interface RequestOptions {
   auth?: boolean
   signal?: AbortSignal
 }
-
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, auth = true, signal } = options
-
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'X-Session-Id': getSessionId(),
   }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-
   if (auth) {
     const token = getToken()
     if (token) headers.Authorization = `Bearer ${token}`
   }
-
   let response: Response
   try {
     response = await fetch(`${BASE}${path}`, {
@@ -203,7 +179,6 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     if (err instanceof DOMException && err.name === 'AbortError') throw err
     throw new ApiError('network', '连不上服务器。请检查网络或后端是否在运行。', 0)
   }
-
   // 后端在**所有**响应回传 session/trace；跟随服务端的会话标识，
   // 避免「客户端以为的会话」与「服务端记录的会话」分叉。
   const echoed = response.headers.get('X-Session-Id')
@@ -214,9 +189,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       /* ignore */
     }
   }
-
   if (response.status === 204) return undefined as T
-
   const text = await response.text()
   let parsed: unknown = null
   if (text) {
@@ -226,24 +199,19 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       parsed = text
     }
   }
-
   if (!response.ok) {
     const { message, code } = humanize(parsed, response.status)
     throw new ApiError(classify(response.status), message, response.status, code)
   }
-
   return parsed as T
 }
-
 // ─────────────────────────────────────────────────────────────
 // 端点
 // ─────────────────────────────────────────────────────────────
-
 export const api = {
   async healthz(): Promise<HealthzResponse> {
     return request<HealthzResponse>('/healthz', { auth: false })
   },
-
   async devLogin(userId: string): Promise<DevLoginResponse> {
     return request<DevLoginResponse>('/v1/auth/dev-login', {
       method: 'POST',
@@ -251,23 +219,19 @@ export const api = {
       body: { user_id: userId },
     })
   },
-
   // ── 宠物 ──
   async listPets(): Promise<PetListResponse> {
     return request<PetListResponse>('/v1/pets')
   },
-
   async createPet(name: string, breed?: string): Promise<{ pet_id: string; name: string }> {
     return request('/v1/pets', {
       method: 'POST',
       body: { name, ...(breed ? { breed } : {}) },
     })
   },
-
   async getProfile(petId: string): Promise<PetProfile> {
     return request<PetProfile>(`/v1/pets/${encodeURIComponent(petId)}/profile`)
   },
-
   /**
    * 建/更新档案。
    *
@@ -283,7 +247,6 @@ export const api = {
       body: { image_urls: imageUrls, confirm },
     })
   },
-
   // ── 对话 / 解释 ──
   async chat(
     petId: string,
@@ -302,7 +265,6 @@ export const api = {
       signal,
     })
   },
-
   /** 录叫声 → 解释。返回的 `interpretation_id` 是主人标注的入口。 */
   async interpret(
     petId: string,
@@ -319,7 +281,6 @@ export const api = {
       signal,
     })
   },
-
   /** 主人标注。**这是案例推理的燃料** —— 没有它，系统学不到任何东西。 */
   async labelMeow(
     petId: string,
@@ -335,7 +296,6 @@ export const api = {
       body: payload,
     })
   },
-
   async listMeowRecords(
     petId: string,
     onlyConfirmed = true,
@@ -344,24 +304,58 @@ export const api = {
       `/v1/pets/${encodeURIComponent(petId)}/meow-records?only_confirmed=${onlyConfirmed}`,
     )
   },
-
   // ── 记忆 / 故事 / 健康 ──
   async listMemories(petId: string, sessionId?: string): Promise<MemoryListResponse> {
     const q = new URLSearchParams({ pet_id: petId })
     if (sessionId) q.set('session_id', sessionId)
     return request<MemoryListResponse>(`/v1/memories?${q.toString()}`)
   },
-
+  // ── 日记本体 ──
+  /** 上传一张照片 / 一段视频，返回可引用的 URL。
+   *
+   * 用 base64 而不是 multipart：少一个依赖、少一种内容类型（见后端 docstring）。
+   * 代价是体积约 +33%。 */
+  async uploadMedia(dataUrl: string, filename?: string): Promise<MediaUploadResponse> {
+    return request<MediaUploadResponse>('/v1/media', {
+      method: 'POST',
+      body: { data_base64: dataUrl, ...(filename ? { filename } : {}) },
+    })
+  },
+  /** 记录一个瞬间。**只要一张照片**，一句话可选。
+   *
+   * 返回里带 `pet_says` —— 记完立刻有句话，那是这个动作的情绪回报。 */
+  async recordMoment(
+    petId: string,
+    mediaUrl: string,
+    note?: string,
+  ): Promise<RecordMomentResponse> {
+    return request<RecordMomentResponse>(`/v1/pets/${encodeURIComponent(petId)}/moments`, {
+      method: 'POST',
+      body: { media_url: mediaUrl, ...(note ? { note } : {}) },
+    })
+  },
+  /** 时间线。**倒序**（最新在前）。 */
+  async timeline(
+    petId: string,
+    opts: { days?: number; limit?: number; scene?: string } = {},
+  ): Promise<TimelineResponse> {
+    const q = new URLSearchParams()
+    if (opts.days) q.set('days', String(opts.days))
+    if (opts.limit) q.set('limit', String(opts.limit))
+    if (opts.scene) q.set('scene', opts.scene)
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return request<TimelineResponse>(
+      `/v1/pets/${encodeURIComponent(petId)}/timeline${suffix}`,
+    )
+  },
   async story(petId: string, day: string): Promise<StoryResponse> {
     return request<StoryResponse>(
       `/v1/pets/${encodeURIComponent(petId)}/story?day=${encodeURIComponent(day)}`,
     )
   },
-
   async health(petId: string): Promise<HealthResponse> {
     return request<HealthResponse>(`/v1/pets/${encodeURIComponent(petId)}/health`)
   },
-
   async recordSignal(
     petId: string,
     payload: { signal: string; value?: number; note?: string; consent_version?: string },
@@ -372,5 +366,4 @@ export const api = {
     })
   },
 }
-
 export type { PetBrief }

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from app.schemas import (
+    Moment,
     MemoryEvent,
     MemoryItem,
     MeowRecord,
@@ -202,4 +203,30 @@ class MemoryStore(Protocol):
         limit: int = 20,
     ) -> list[MemoryItem]:
         """向量召回。**必须按 ``pet_id`` 过滤**——这是隔离的正确性底线。"""
+        ...
+
+    # ── 瞬间（日记本体，`docs/11` §2.1） ─────────────────
+
+    def insert_moment(self, moment: Moment) -> Moment:
+        """写入一条瞬间记录。
+
+        与记忆分开：瞬间是**流水**（按时间线走），记忆是**可检索的事实**
+        （走向量召回）。把每张照片都塞进检索会让稳定事实被日常流水淹没。
+        """
+        ...
+
+    def list_moments(
+        self,
+        *,
+        user_id: str,
+        pet_id: str,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Moment]:
+        """按时间**倒序**取瞬间（最新在前）。
+
+        与 ``list_messages`` 的正序刻意相反：时间线要先看到最近的，
+        而日报要按顺序读。
+        """
         ...

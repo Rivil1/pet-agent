@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, time, timedelta, timezone
@@ -21,6 +22,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.auth import InvalidToken, bearer_token, verify_token
@@ -28,6 +30,7 @@ from app.auth.token import DEFAULT_TTL_SECONDS, issue_token
 from app.digest import summarize_day
 from app.graph import build_graph, initial_state, tenant_of
 from app.habits import detect_habits
+from app.schemas import Moment, MomentScene, extract_scene
 from app.habits.answer import render_habit_report
 from app.health import HealthWriter, InMemoryHealthStore, RedFlagTable
 from app.interpreter import PriorTable
@@ -95,6 +98,31 @@ def _pet_brief(pet: PetProfile) -> dict[str, Any]:
 class CreatePetRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     breed: str | None = None
+
+
+class MomentRequest(BaseModel):
+    """记录一个瞬间（`docs/11` §2.1）。
+
+    **输入只要一张照片**，一句话是可选的 ——
+    「用户想猫时是情绪状态，不想打字、不想被问问题。
+    每多一个输入字段，转化率就掉一截。」
+    """
+
+    media_url: str = Field(min_length=1, description="照片 / 短视频地址")
+    note: str | None = Field(
+        default=None,
+        description=(
+            "可选的一句话。**为空是正常的，不是缺失** —— "
+            "场景标签由系统抽取，不必要求用户填任何东西。"
+        ),
+    )
+
+
+class MediaUploadRequest(BaseModel):
+    """base64 上传。见 `upload_media` 的 docstring 说明为什么不用 multipart。"""
+
+    data_base64: str = Field(min_length=1)
+    filename: str | None = Field(default=None, max_length=255)
 
 
 class DevLoginRequest(BaseModel):
@@ -281,6 +309,14 @@ def create_app(
     tracing_config: TracingConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="pet-agent", version="0.1.0")
+
+    # 上传的媒体直接静态托管。
+    #
+    # **目录在启动时建**：`StaticFiles` 在目录不存在时会直接抛错，
+    # 而那个错误发生在导入期、看起来像代码问题 ——
+    # 实际只是「还没人传过东西」。主动建目录把这类启动失败消掉。
+    MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+    app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 
     # ── 观测（LangSmith）──
     # 取舍见 app/observability/langsmith.py：**失败不致命，但不静默**。
@@ -872,6 +908,126 @@ def create_app(
             ],
         }
 
+    # ── 媒体上传 ────────────────────────────────────────
+
+    @app.post("/v1/media", status_code=status.HTTP_201_CREATED)
+    def upload_media(
+        body: MediaUploadRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, Any]:
+        """上传一张照片 / 一段短视频，返回可引用的 URL。
+
+        ## 为什么用 base64 而不是 multipart
+
+        FastAPI 的 `UploadFile` 需要额外的 `python-multipart` 依赖，
+        而这里的需求就是「把一张图传上来」。base64 在 JSON 里
+        少一个依赖、少一种内容类型，代价是体积大约 33%。
+
+        ## 为什么不做成对象存储
+
+        `docs/11` §7 把对象存储列为待评估项。本地文件系统在这个阶段
+        够用，而且**没有额外故障点** —— 换成 OSS 只需要改这一个函数。
+
+        ## 限制（**明确写出来**）
+
+        - 只接受 图片 / 音频 / 视频 三类，按魔数判断而非按扩展名
+        - 单文件上限 8MB（base64 后约 11MB），防止一次请求打满内存
+        """
+        raw = _decode_media(body.data_base64, max_bytes=MAX_MEDIA_BYTES)
+        sniffed = _sniff_media(raw)
+        if sniffed is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "UNSUPPORTED_MEDIA",
+                    "message": "只支持图片 / 音频 / 视频，且需为常见格式",
+                },
+            )
+
+        kind, suffix = sniffed
+        digest = hashlib.sha256(raw).hexdigest()[:24]
+        # 目录按用户分 —— 便于将来按租户清理，也让文件名不互相覆盖
+        directory = MEDIA_ROOT / _safe_segment(user_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{digest}{suffix}"
+        if not path.exists():  # 同内容重复上传不重写（幂等）
+            path.write_bytes(raw)
+
+        return {
+            "url": f"/media/{_safe_segment(user_id)}/{digest}{suffix}",
+            "kind": kind,
+            "bytes": len(raw),
+        }
+
+    # ── 日记本体：瞬间与时间线（docs/11 §2.1–2.2） ──────
+
+    @app.post("/v1/pets/{pet_id}/moments", status_code=status.HTTP_201_CREATED)
+    def record_moment(
+        pet_id: str,
+        body: MomentRequest,
+        request: Request,
+        user_id: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        """记录一个瞬间。**一次点击就完成，不弹确认框。**
+
+        ## 为什么不等用户描述
+
+        `docs/11` §2.1：想猫的时候用户处于情绪状态，
+        不想打字、不想被问问题。所以场景标签由系统抽，抽不出就归「其他」。
+
+        ## 为什么不需要确认（与档案相反）
+
+        档案是**身份锚点**，写错会污染后续所有校验，所以必须用户确认（§2.3）。
+        瞬间是**流水** —— 记错了再记一条就行，纠错成本远低于确认成本。
+        给流水加确认框，等于用档案的严谨度要求日记，那正是文档 §0.3
+        「两个产品被焊在一起」的病灶。
+        """
+        owned_pet(user_id, pet_id)
+        session_id, _ = scope_of(request)
+
+        moment = Moment(
+            user_id=user_id,
+            pet_id=pet_id,
+            session_id=session_id,
+            media_url=body.media_url,
+            note=body.note,
+            # 系统抽取；**没写就不猜**（返回 other）
+            scene=extract_scene(body.note),
+        )
+        stored = store.insert_moment(moment)
+
+        return {
+            "moment": _moment_brief(stored),
+            # 猫对这一刻的回应 —— 模板生成，确定性、无延迟、不花钱。
+            # 记完之后立刻有句话，是这个动作的**情绪回报**。
+            "pet_says": _moment_reply(stored),
+        }
+
+    @app.get("/v1/pets/{pet_id}/timeline")
+    def timeline(
+        pet_id: str,
+        user_id: str = Depends(current_user),
+        days: int = 30,
+        limit: int = 100,
+        scene: str | None = None,
+    ) -> dict[str, Any]:
+        """时间线：**按时间倒序**，支持按场景过滤与「最近 N 天」。"""
+        owned_pet(user_id, pet_id)
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 3650)))
+        moments = store.list_moments(
+            user_id=user_id, pet_id=pet_id, since=since, limit=max(1, min(limit, 500))
+        )
+        if scene:
+            moments = [m for m in moments if m.scene.value == scene]
+
+        return {
+            "count": len(moments),
+            "days": days,
+            "scene": scene,
+            "moments": [_moment_brief(m) for m in moments],
+            # 场景分布 —— 时间线的「自动归类」（§2.2）
+            "scene_counts": _scene_counts(moments),
+        }
+
     @app.get("/v1/pets/{pet_id}/habits")
     def list_habits(
         pet_id: str,
@@ -946,6 +1102,154 @@ def create_app(
 # ─────────────────────────────────────────────────────────────
 # 辅助
 # ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# 媒体上传辅助
+# ─────────────────────────────────────────────────────────────
+
+#: 媒体文件落盘目录。**不进版本库**（见 .gitignore）。
+MEDIA_ROOT = Path(os.environ.get("PET_AGENT_MEDIA_DIR") or "/app/media")
+
+#: 单文件上限（字节）。base64 后约 1.33 倍，8MB 原图 → 约 11MB 请求体。
+#: 这个值防的是「一次请求打满内存」，而不是存储成本。
+MAX_MEDIA_BYTES = 8 * 1024 * 1024
+
+#: 魔数 → (类型, 后缀)。**顺序即优先级。**
+#:
+#: **按内容判断而不是按扩展名** —— 扩展名是客户端说了算的，
+#: 而一个叫 `.jpg` 的可执行文件不该被当成图片存下来。
+#:
+#: ⚠️ 初版这个函数**顺手改了模块级字典**来决定后缀，那是个副作用：
+#: 同一进程里先传一个 PNG、再传一个 JPG，第二次会拿到 `.png` 后缀 ——
+#: 而文件名带错后缀不会报错，只会在浏览器里显示不出来。
+#: 现在后缀与判断结果一起返回，没有共享状态。
+_MEDIA_MAGIC: tuple[tuple[bytes, str, str], ...] = (
+    (b"\xff\xd8\xff", "image", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image", ".png"),
+    (b"GIF87a", "image", ".gif"),
+    (b"GIF89a", "image", ".gif"),
+    (b"RIFF", "image", ".webp"),  # RIFF....WEBP，粗判即可
+    (b"\x00\x00\x00", "video", ".mp4"),  # ftyp box
+    (b"\x1aE\xdf\xa3", "video", ".mkv"),
+    (b"OggS", "audio", ".ogg"),
+    (b"ID3", "audio", ".mp3"),
+    (b"\xff\xfb", "audio", ".mp3"),
+    (b"fLaC", "audio", ".flac"),
+)
+
+
+def _sniff_media(raw: bytes) -> tuple[str, str] | None:
+    """按魔数判断 `(类型, 后缀)`。认不出就返回 `None`（**不按扩展名猜**）。"""
+    for magic, kind, suffix in _MEDIA_MAGIC:
+        if raw.startswith(magic):
+            return kind, suffix
+    return None
+
+
+def _decode_media(data_base64: str, *, max_bytes: int) -> bytes:
+    """解码 base64。**在解码前先按长度粗筛** —— 否则一个超大请求会先被打进内存。"""
+    import base64
+    import binascii
+
+    payload = data_base64.strip()
+    # 去掉 data URL 前缀（前端 FileReader 会给）
+    if payload.startswith("data:") and "," in payload:
+        payload = payload.split(",", 1)[1]
+
+    # base64 长度上限 ≈ 原始字节 * 4/3 + 少量 padding
+    if len(payload) > max_bytes * 4 // 3 + 64:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "code": "MEDIA_TOO_LARGE",
+                "message": f"文件超过 {max_bytes // 1024 // 1024}MB 上限",
+            },
+        )
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "BAD_BASE64", "message": "不是合法的 base64"},
+        ) from exc
+    if len(raw) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "code": "MEDIA_TOO_LARGE",
+                "message": f"文件超过 {max_bytes // 1024 // 1024}MB 上限",
+            },
+        )
+    return raw
+
+
+def _safe_segment(value: str) -> str:
+    """把用户 id 变成一个安全的路径段。
+
+    ⚠️ **这是路径穿越的防线。** `user_id` 来自 token 的载荷，
+    在开发登录下是用户自取的 —— 一个叫 `../../etc` 的 id
+    若直接拼进路径，就能写到目录外面去。
+    白名单比转义安全：转义要枚举所有边界，白名单只判一次。
+    """
+    import re
+
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]", "_", value)[:64]
+    if not cleaned or cleaned in {".", ".."}:
+        cleaned = "anon"
+    return cleaned
+
+
+def _moment_brief(moment: Moment) -> dict[str, Any]:
+    return {
+        "moment_id": moment.moment_id,
+        "media_url": moment.media_url,
+        "note": moment.note,
+        "scene": moment.scene.value,
+        "scene_display": moment.scene_display,
+        "captured_at": moment.captured_at.isoformat(),
+    }
+
+
+def _scene_counts(moments: list[Moment]) -> dict[str, int]:
+    """场景分布。**只统计出现过的** —— 补零会让「0 次」与「没这个场景」混淆。"""
+    out: dict[str, int] = {}
+    for m in moments:
+        out[m.scene.value] = out.get(m.scene.value, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+#: 猫对一瞬间的回应。**按场景给的模板，不走模型。**
+#:
+#: 为什么不调 LLM：这是**记录动作的情绪回报**，它必须立刻出现。
+#: 一次几十毫秒的点击不值得等一次模型往返；而且模板是确定性的，
+#: 同一个瞬间永远得到同一句话 —— 对日记来说那是对的
+#: （你不会希望翻回去看时那句话变了）。
+_MOMENT_REPLIES: dict[MomentScene, tuple[str, ...]] = {
+    MomentScene.WINDOW: (
+        "窗台是我的地盘，那儿能看见整条街。",
+        "外面有只鸟，我盯了它好久。",
+    ),
+    MomentScene.EATING: ("今天这顿不错，还想再来一份。", "吃完了，碗都舔干净了。"),
+    MomentScene.SLEEPING: ("别吵…我在做梦呢。", "刚睡醒，还有点懵。"),
+    MomentScene.PLAYING: ("这个好玩，再来一次！", "抓到啦 —— 不过它跑掉了。"),
+    MomentScene.GROOMING: ("舔干净了，现在我很体面。", "别看我，我在整理仪容。"),
+    MomentScene.WITH_HUMAN: ("你身上暖和，我就赖着不走了。", "别动，我在这待会儿。"),
+    MomentScene.OTHER: ("记下来啦。", "嗯，我记住了。"),
+}
+
+
+def _moment_reply(moment: Moment) -> str:
+    """按场景挑一句。
+
+    多条时用 `moment_id` 的哈希选 —— **确定性**，同一个瞬间永远同一句。
+    用随机数会让「翻回去看」时那句话变了。
+    """
+    options = _MOMENT_REPLIES.get(moment.scene) or _MOMENT_REPLIES[MomentScene.OTHER]
+    if len(options) == 1:
+        return options[0]
+    seed = sum(ord(c) for c in (moment.moment_id or "")) or 0
+    return options[seed % len(options)]
 
 
 def _trust_notice(provider_info: dict[str, str] | None) -> str | None:

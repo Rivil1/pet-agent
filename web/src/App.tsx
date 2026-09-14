@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError, getActivePetId, getToken, setActivePetId, setToken } from './api/client'
 import type { HealthzResponse, PetBrief } from './api/types'
-import { AppShell, type TabKey, TABS } from './components/AppShell'
+import { ALL_TAB_KEYS, AppShell, type TabKey } from './components/AppShell'
 import { Login } from './components/Login'
 import { Spinner } from './components/ui'
 import { PetsPage } from './pages/PetsPage'
+import { TimelinePage } from './pages/TimelinePage'
 import { ChatPage } from './pages/ChatPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { StoryPage } from './pages/StoryPage'
@@ -13,8 +14,10 @@ import { HealthPage } from './pages/HealthPage'
 /** 从 hash 读当前标签，使刷新后停在原处、链接可分享。 */
 function readTab(): TabKey {
   const raw = window.location.hash.replace(/^#\/?/, '')
-  const found = TABS.find((t) => t.key === raw)
-  return found ? found.key : 'chat'
+  // ⚠️ 用 `ALL_TAB_KEYS` 而不是 `TABS` —— 后者不含 `profile`/`health`，
+  // 用它会把这些 URL **静默回退**到日记页（E2E 抓到过这个 bug）。
+  const found = ALL_TAB_KEYS.find((k) => k === raw)
+  return found ?? 'timeline'
 }
 
 export function App() {
@@ -108,7 +111,8 @@ export function App() {
   function handleSelectPet(pet: PetBrief) {
     setActivePetIdState(pet.pet_id)
     setActivePetId(pet.pet_id)
-    goTab('chat')
+    // 选完宠物回**日记**而不是对话 —— 记录是主循环，说话是它的补充
+    goTab('timeline')
   }
 
   function handleCreated(pet: PetBrief) {
@@ -148,6 +152,16 @@ export function App() {
           activePetId={activePetId}
           onSelect={handleSelectPet}
           onCreated={handleCreated}
+          onOpenProfile={(p) => {
+            setActivePetIdState(p.pet_id)
+            setActivePetId(p.pet_id)
+            goTab('profile')
+          }}
+          onOpenHealth={(p) => {
+            setActivePetIdState(p.pet_id)
+            setActivePetId(p.pet_id)
+            goTab('health')
+          }}
           loading={false}
         />
       )
@@ -198,6 +212,8 @@ function PetScoped({
   onMemoryChanged: () => void
 }) {
   switch (tab) {
+    case 'timeline':
+      return <TimelinePage petId={pet.pet_id} petName={pet.name} />
     case 'chat':
       return <ChatPage petId={pet.pet_id} petName={pet.name} onMemoryChanged={onMemoryChanged} />
     case 'profile':

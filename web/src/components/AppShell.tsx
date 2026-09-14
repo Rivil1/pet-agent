@@ -1,20 +1,53 @@
 import type { ReactNode } from 'react'
 import type { PetBrief } from '../api/types'
 import { cx } from '../lib/utils'
-import { IconCat, IconChat, IconHealth, IconLogout, IconProfile, IconStory } from './icons'
+import { IconCat, IconChat, IconDiary, IconLogout, IconStory } from './icons'
 
-export type TabKey = 'pets' | 'chat' | 'profile' | 'story' | 'health'
+/**
+ * 可到达的页面。
+ *
+ * ⚠️ **`profile` 与 `health` 不在标签栏里，但仍是合法目标。**
+ * 它们从「猫」页进入 —— 见下面的 `TABS` 与 `App.tsx` 的说明。
+ */
+export type TabKey = 'timeline' | 'chat' | 'story' | 'pets' | 'profile' | 'health'
 
+/**
+ * 标签栏。**只放日常会用的四个。**
+ *
+ * ## 为什么把「日记」放第一位、并且把档案/健康移出标签栏
+ *
+ * `docs/11` §8.1 把「记录动作 + 照片时间线」列为 P0 第一条，
+ * 理由是「**无此则产品不成立**」。而它此前完全没实现 ——
+ * 原来的五个标签是「对话 / 档案 / 一天 / 健康 / 猫」，
+ * 一个想猫的人打开应用，看到的是一个**查询界面**。
+ *
+ * 档案与健康没有消失，只是从「每天看」降为「设置里翻到」：
+ * 前者是**一次性设置**（建完就不用改），后者文档 §8.2 明确降到 P2
+ * （「在 S1/S2 中触发频率极低」）。
+ */
 export const TABS: Array<{
   key: TabKey
   label: string
   Icon: (p: { width?: number; height?: number }) => ReactNode
 }> = [
-  { key: 'chat', label: '对话', Icon: IconChat },
-  { key: 'profile', label: '档案', Icon: IconProfile },
+  { key: 'timeline', label: '日记', Icon: IconDiary },
+  { key: 'chat', label: '说话', Icon: IconChat },
   { key: 'story', label: '一天', Icon: IconStory },
-  { key: 'health', label: '健康', Icon: IconHealth },
   { key: 'pets', label: '猫', Icon: IconCat },
+]
+
+/**
+ * **全部合法的页面键** —— 包含不在标签栏里的 `profile` / `health`。
+ *
+ * ⚠️ 为什么要单独列出：路由解析若只认 `TABS` 里的键，
+ * 那么 `#/profile` 会被当成非法值**静默回退到日记页** ——
+ * 用户点「档案」看到的是日记，而没有任何报错。
+ * 这个 bug 是 E2E 抓到的（「档案页挂载正确」失败，页面长度只有 89）。
+ */
+export const ALL_TAB_KEYS: readonly TabKey[] = [
+  ...TABS.map((t) => t.key),
+  'profile',
+  'health',
 ]
 
 /**

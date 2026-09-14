@@ -25,6 +25,7 @@ from app.schemas import (
     MemorySource,
     MemoryStatus,
     MeowRecord,
+    Moment,
     PendingInterpretation,
     PetProfile,
     RetrievalSource,
@@ -62,6 +63,7 @@ class InMemoryStore:
     _pending: dict[str, PendingInterpretation] = field(default_factory=dict)
     _messages: dict[str, SessionMessage] = field(default_factory=dict)
     _dedup_index: dict[tuple[str, str], str] = field(default_factory=dict)
+    _moments: dict[str, Moment] = field(default_factory=dict)
 
     # ── 档案 ──────────────────────────────────────────────
 
@@ -312,6 +314,40 @@ class InMemoryStore:
             for sim, ev in scored[:limit]
         ]
 
+    # ── 瞬间（日记本体） ─────────────────────────────
+
+    def insert_moment(self, moment: Moment) -> Moment:
+        stored = moment
+        if not stored.moment_id:
+            stored = moment.model_copy(
+                update={"moment_id": f"mo-{uuid.uuid4().hex[:12]}"}
+            )
+        assert stored.moment_id is not None  # noqa: S101
+        self._moments[stored.moment_id] = stored
+        return stored
+
+    def list_moments(
+        self,
+        *,
+        user_id: str,
+        pet_id: str,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Moment]:
+        out = [
+            m
+            for m in self._moments.values()
+            if m.user_id == user_id and m.pet_id == pet_id
+        ]
+        if since is not None:
+            out = [m for m in out if m.captured_at >= since]
+        if until is not None:
+            out = [m for m in out if m.captured_at < until]
+        # **倒序**：时间线要先看到最近的
+        out.sort(key=lambda m: m.captured_at, reverse=True)
+        return out[:limit] if limit is not None else out
+
     # ── 级联硬删 ─────────────────────────────────────
 
     def delete_pet_data(self, *, user_id: str, pet_id: str) -> int:
@@ -358,6 +394,12 @@ class InMemoryStore:
             k for k, v in self._messages.items() if _tenant_of(v) == (user_id, pet_id)
         ]:
             del self._messages[mdid]
+            removed += 1
+
+        for moid in [
+            k for k, v in self._moments.items() if _tenant_of(v) == (user_id, pet_id)
+        ]:
+            del self._moments[moid]
             removed += 1
 
         # ⚠️ **宠物档案行本身也要删。**

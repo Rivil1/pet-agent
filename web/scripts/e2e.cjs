@@ -151,7 +151,16 @@ async function main() {
     const { text } = await render(window)
     check('已登录进入主应用', text.includes('猫事') && !text.includes('开始记录'))
     check('顶栏显示当前宠物', text.includes(petName), `期望包含 "${petName}"`)
-    check('底部标签栏渲染', ['对话', '档案', '一天', '健康', '猫'].every((t) => text.includes(t)))
+    // 标签栏是**日记形态**的四个（档案/健康移到了「猫」页里）
+    check(
+      '底部标签栏渲染（日记形态）',
+      ['日记', '说话', '一天', '猫'].every((t) => text.includes(t)),
+    )
+    check(
+      '档案/健康不再占据标签栏',
+      !text.includes('档案') && !text.includes('健康'),
+      '它们是一次性设置与低频功能，不该占日常入口',
+    )
     check('模型模式常驻顶栏', text.includes('LIVE') || text.includes('MOCK'))
     check('主应用无运行时错误', errors.length === 0, errors[0] || '')
   }
@@ -160,6 +169,7 @@ async function main() {
   // 3. 空态：各标签页在没数据时不能崩
   // ─────────────────────────────────────────────
   for (const [hash, label, expect] of [
+    ['#/timeline', '日记', '日记'],
     ['#/profile', '档案', '还没有档案'],
     ['#/story', '一天', '没有可写的记录'],
     ['#/health', '健康', '无法评估'],
@@ -208,7 +218,12 @@ async function main() {
 
     const after = (window.document.getElementById('root')?.textContent || '').replace(/\s+/g, ' ')
     check('切换宠物后顶栏更新', after.includes(other.name), `期望包含 "${other.name}"`)
-    check('切换后对话页为空态', after.includes('说说'), '对话流应被清空，避免跨猫串味')
+    // 选完宠物落到**日记页**（记录是主循环，说话是它的补充）
+    check(
+      '切换宠物后落到日记页',
+      after.includes('的日记'),
+      '记录是主循环，选完宠物应回到日记',
+    )
     check('切换前渲染非空', htmlBefore.length > 200, `before 长度 ${before.length}`)
   }
 

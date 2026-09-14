@@ -107,6 +107,7 @@ from app.schemas.plan import (
     SubTaskStatus,
 )
 from app.schemas.session import SessionMessage
+from app.schemas.moment import Moment, MomentScene, SCENE_DISPLAY, extract_scene
 from app.schemas.story import (
     DISCLAIMER_ENTERTAINMENT,
     ENTERTAINABLE_EVENT_TYPES,
@@ -175,6 +176,11 @@ __all__ = [
     "INTENT_POLICIES",
     "MISROUTE_COSTS",
     "SUBJECT_FALLBACK_PREFIX",
+    # 瞬间（日记本体）
+    "Moment",
+    "MomentScene",
+    "SCENE_DISPLAY",
+    "extract_scene",
     "misroute_cost",
     "policy_for",
     # ── guard ──

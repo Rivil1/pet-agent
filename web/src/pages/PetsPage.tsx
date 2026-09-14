@@ -16,12 +16,18 @@ export function PetsPage({
   pets,
   activePetId,
   onSelect,
+  onOpenProfile,
+  onOpenHealth,
   onCreated,
   loading,
 }: {
   pets: PetBrief[]
   activePetId: string | null
   onSelect: (pet: PetBrief) => void
+  /** 打开该宠物的档案（标签栏里没有它 —— 它是一次性设置，不是日常页面） */
+  onOpenProfile: (pet: PetBrief) => void
+  /** 打开健康分诊（文档 §8.2 降为 P2，从标签栏移到这里） */
+  onOpenHealth: (pet: PetBrief) => void
   onCreated: (pet: PetBrief) => void
   loading: boolean
 }) {
@@ -167,6 +173,31 @@ export function PetsPage({
                             +{pet.must_keep_features.length - 2}
                           </span>
                         )}
+                      </div>
+
+                      {/* 档案与健康的入口。
+                          它们**不在标签栏里**：档案是一次性设置（建完就不用改），
+                          健康是低频功能（文档 §8.2 降到 P2）。
+                          但也不能让功能静默消失 —— 所以放在这里。 */}
+                      <div className="mt-2.5 flex gap-3">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onOpenProfile(pet)
+                          }}
+                          className="text-[11.5px] font-semibold text-ink-faint transition hover:text-persimmon"
+                        >
+                          档案
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onOpenHealth(pet)
+                          }}
+                          className="text-[11.5px] font-semibold text-ink-faint transition hover:text-persimmon"
+                        >
+                          健康
+                        </button>
                       </div>
                     </div>
 

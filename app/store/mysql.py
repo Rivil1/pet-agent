@@ -50,6 +50,8 @@ from app.schemas import (
     MemorySource,
     MemoryStatus,
     MeowRecord,
+    Moment,
+    MomentScene,
     PendingInterpretation,
     PetProfile,
     RetrievalSource,
@@ -432,6 +434,13 @@ _TENANT_SCOPED_SQL: dict[str, str] = {
     "delete_pet": """
         DELETE FROM pets WHERE pet_id = %s AND user_id = %s
     """,
+    "list_moments": """
+        SELECT * FROM moments
+        WHERE user_id = %s AND pet_id = %s
+    """,
+    "delete_pet_moments": """
+        DELETE FROM moments WHERE user_id = %s AND pet_id = %s
+    """,
     "select_vectors": """
         SELECT memory_id, user_id, pet_id, vector FROM memories
         WHERE vector IS NOT NULL AND user_id = %s AND pet_id = %s
@@ -647,6 +656,7 @@ class MySQLStore(MemoryStore):
                 "delete_pet_meow_records",
                 "delete_pet_messages",
                 "delete_pet_pending",
+                "delete_pet_moments",
             ):
                 cur.execute(_TENANT_SCOPED_SQL[key], (user_id, pet_id))
                 removed += cur.rowcount or 0
@@ -668,6 +678,66 @@ class MySQLStore(MemoryStore):
             logger.warning("删除宠物时向量清理失败：%s", exc)
 
         return removed
+
+    # ── 瞬间（日记本体） ─────────────────────────────
+
+    def insert_moment(self, moment: Moment) -> Moment:
+        moment_id = moment.moment_id or str(uuid4())
+        stored = moment.model_copy(update={"moment_id": moment_id})
+        sql = """
+            INSERT INTO moments (
+                moment_id, user_id, pet_id, session_id, media_url,
+                note, scene, captured_at, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        with self._pool.acquire() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    moment_id,
+                    stored.user_id,
+                    stored.pet_id,
+                    stored.session_id,
+                    stored.media_url,
+                    stored.note,
+                    _enum_value(stored.scene),
+                    _to_db(stored.captured_at),
+                    _to_db(stored.created_at),
+                ),
+            )
+        return stored
+
+    def list_moments(
+        self,
+        *,
+        user_id: str,
+        pet_id: str,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Moment]:
+        """按时间**倒序**取（最新在前）。
+
+        与 `list_recent_messages` 的「先倒序取再反转」不同 ——
+        时间线**要的就是倒序**，不需要反转回来。
+        """
+        sql = _TENANT_SCOPED_SQL["list_moments"]
+        params: list[Any] = [user_id, pet_id]
+        if since is not None:
+            sql += " AND captured_at >= %s"
+            params.append(_to_db(since))
+        if until is not None:
+            sql += " AND captured_at < %s"
+            params.append(_to_db(until))
+        sql += " ORDER BY captured_at DESC"
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(limit)
+
+        with self._pool.acquire() as conn, conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = list(cur.fetchall())
+        return [_row_to_moment(r) for r in rows]
 
     # ── 记忆 ──────────────────────────────────────────────
 
@@ -1222,6 +1292,20 @@ def _row_to_memory(row: Any) -> MemoryEvent:
         dedup_key=_row_field(row, "dedup_key"),
         created_at=_from_db(_row_field(row, "created_at")),
         updated_at=_from_db(_row_field(row, "updated_at")),
+    )
+
+
+def _row_to_moment(row: Any) -> Moment:
+    return Moment(
+        moment_id=_row_field(row, "moment_id"),
+        user_id=_row_field(row, "user_id"),
+        pet_id=_row_field(row, "pet_id"),
+        session_id=_row_field(row, "session_id"),
+        media_url=_row_field(row, "media_url"),
+        note=_row_field(row, "note"),
+        scene=MomentScene(_row_field(row, "scene")),
+        captured_at=_from_db(_row_field(row, "captured_at")),
+        created_at=_from_db(_row_field(row, "created_at")),
     )
 
 

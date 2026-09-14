@@ -135,3 +135,13 @@ export const IconLogout = (p: IconProps) => (
     <path d="M12.5 12h7M17 8.8l3.2 3.2-3.2 3.2" />
   </Base>
 )
+
+/** 日记：一本摊开的本子 + 一条书签带 */
+export const IconDiary = (p: IconProps) => (
+  <Base {...p}>
+    <path d="M6 3.5h11a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H6" />
+    <path d="M6 3.5A1.5 1.5 0 0 0 4.5 5v14A1.5 1.5 0 0 0 6 20.5" />
+    <path d="M7.5 8h8M7.5 11.5h8M7.5 15h5" />
+    <path d="M15.5 3.5v5l1.5-1 1.5 1v-5" />
+  </Base>
+)

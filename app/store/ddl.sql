@@ -273,3 +273,35 @@ CREATE TABLE IF NOT EXISTS health_assessments (
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_unicode_ci
   COMMENT = '健康评估结果（派生，级联硬删）';
+
+
+-- ─────────────────────────────────────────────────────────────
+-- 瞬间（日记本体，docs/11 §2.1）
+--
+-- 与 memories **刻意分开**：
+--   memories = 可检索的事实（走向量召回）
+--   moments  = 一次流水（按时间线走）
+--
+-- 把每张照片都塞进记忆检索，会让「它怕吸尘器」这类稳定事实
+-- 被日常流水淹没 —— 而那正是记忆层要防的事。
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS moments (
+    moment_id   CHAR(36)     NOT NULL,
+    user_id     VARCHAR(128) NOT NULL,
+    pet_id      CHAR(36)     NOT NULL,
+    session_id  VARCHAR(64)  NULL,
+    media_url   TEXT         NOT NULL COMMENT '照片 / 短视频地址',
+    note        VARCHAR(500) NULL COMMENT '用户可选的一句话（可为空，不是缺失）',
+    scene       VARCHAR(24)  NOT NULL COMMENT '系统抽取的场景标签；没写就不猜 = other',
+    captured_at DATETIME(6)  NOT NULL COMMENT '记录时刻 —— 瞬间的意义就在于「刚刚发生」',
+    created_at  DATETIME(6)  NOT NULL,
+
+    PRIMARY KEY (moment_id),
+    -- 时间线按时间倒序取，索引顺序与之匹配
+    KEY idx_moment_timeline (user_id, pet_id, captured_at),
+    -- 按场景聚合（周回顾要按场景分组）
+    KEY idx_moment_scene (user_id, pet_id, scene, captured_at)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_unicode_ci
+  COMMENT = '瞬间记录（日记）';
