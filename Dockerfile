@@ -60,6 +60,14 @@ COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser data/ ./data/
 COPY --chown=appuser:appuser pyrightconfig.json .
 
+# 上传媒体的落盘目录。
+#
+# ⚠️ **必须在镜像里建好并 chown 给 appuser。**
+# 容器以非 root 的 `appuser` 运行，而 `/app` 归 root ——
+# 让应用在启动时 `mkdir /app/media` 会 PermissionError，
+# 而那个报错发生在**导入期**，看起来像代码坏了。
+RUN mkdir -p /app/media && chown appuser:appuser /app/media
+
 # 环境变量
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

@@ -71,6 +71,13 @@ services:
       start_period: 20s
     networks:
       - pet-net
+    volumes:
+      # ⚠️ **媒体必须挂卷。**
+      #
+      # 不挂的话，每次 `up -d --force-recreate` 都会新建容器 ——
+      # 而容器内的 `/app/media` 随之消失，**用户记录的所有照片就没了**。
+      # 对日记产品那是数据丢失，而且丢得毫无征兆（界面只是变空）。
+      - pet-media:/app/media
     deploy:
       resources:
         limits:
@@ -182,6 +189,8 @@ networks:
     driver: bridge
 
 volumes:
+  # 用户上传的照片 / 视频。**独立卷** —— 它与数据库同等级重要。
+  pet-media:
   mysql-data:
   milvus-data:
   redis-data:
